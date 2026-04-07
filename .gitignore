@@ -1,0 +1,28 @@
+# Glossary database (regenerable per-project)
+.claude/glossary.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dev workspace
+glossary-workspace/
+evals/
+docs/
+references/
+.serena/
+-p/
