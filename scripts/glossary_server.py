@@ -829,6 +829,189 @@ async def glossary_init(ctx: Context = None) -> str:
         return _handle_error(e)
 
 
+@mcp.tool(
+    name="glossary_enrich",
+    annotations={
+        "title": "Enrich Undescribed Symbols",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_enrich(
+    file_path: Annotated[str | None, Field(
+        description="Limit to a specific file (partial path OK). Omit to scan all files.",
+    )] = None,
+    symbol_type: Annotated[SymbolType | None, Field(
+        description="Limit to a specific symbol type (fn, class, method, etc.).",
+    )] = None,
+    limit: Annotated[int, Field(
+        ge=1, le=50,
+        description="Max symbols to return per call (default 20). Keep small for focused descriptions.",
+    )] = 20,
+    context_lines: Annotated[int, Field(
+        ge=5, le=50,
+        description="Lines of source to include after each symbol definition (default 15).",
+    )] = 15,
+    ctx: Context = None,
+) -> str:
+    """Return undescribed symbols with source context for LLM description generation.
+
+    Finds symbols that have no description (neither from docstrings nor manual),
+    reads source lines around each symbol, and returns them formatted for the LLM
+    to generate descriptions. After generating, save them with glossary_describe_batch.
+
+    Workflow: glossary_enrich → LLM generates descriptions → glossary_describe_batch.
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+        root = find_project_root()
+
+        def _query() -> list[sqlite3.Row]:
+            conditions = ["description IS NULL"]
+            params: list = []
+            if file_path:
+                normalized = file_path.replace("\\", "/")
+                escaped = escape_like(normalized)
+                conditions.append(
+                    "(file_path = ? OR file_path LIKE ? ESCAPE '\\')"
+                )
+                params.extend([normalized, f"%/{escaped}"])
+            if symbol_type:
+                conditions.append("symbol_type = ?")
+                params.append(symbol_type)
+
+            where = " AND ".join(conditions)
+            params.append(limit)
+            return conn.execute(
+                f"""SELECT file_path, symbol_name, symbol_type, signature,
+                           parent, line_number
+                    FROM symbols WHERE {where}
+                    ORDER BY file_path, line_number
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            scope = f" in '{file_path}'" if file_path else ""
+            return f"All symbols{scope} already have descriptions."
+
+        # Read source context for each symbol
+        out = StringIO()
+        out.write(f"# {len(rows)} symbols need descriptions\n\n")
+        out.write("Generate a 1-line description (max 100 tokens) for each symbol.\n")
+        out.write("Then call `glossary_describe_batch` with the results.\n\n")
+
+        file_cache: dict[str, list[str]] = {}
+        for row in rows:
+            fp = row["file_path"]
+            if fp not in file_cache:
+                abs_path = os.path.join(root, fp)
+                try:
+                    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                        file_cache[fp] = f.readlines()
+                except OSError:
+                    file_cache[fp] = []
+
+            lines = file_cache[fp]
+            start = max(0, (row["line_number"] or 1) - 1)
+            end = min(len(lines), start + context_lines)
+            snippet = "".join(lines[start:end]).rstrip()
+
+            parent_info = f" (in {row['parent']})" if row["parent"] else ""
+            out.write(f"## `{row['symbol_name']}` — {row['symbol_type']}{parent_info}\n")
+            out.write(f"**File:** {fp}:{row['line_number']}\n")
+            out.write(f"```\n{snippet}\n```\n\n")
+
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_describe_batch",
+    annotations={
+        "title": "Batch Describe Symbols",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_describe_batch(
+    descriptions: Annotated[str, Field(
+        description=(
+            "JSON array of objects: [{\"target\": \"file:symbol\", \"description\": \"...\"}]. "
+            "Target format: 'file_path:symbol_name' or just 'symbol_name'."
+        ),
+        min_length=2,
+    )],
+    ctx: Context = None,
+) -> str:
+    """Save multiple symbol descriptions in one call.
+
+    Accepts a JSON array of {target, description} objects.
+    Each description is marked as manual (survives rescans).
+    Use after glossary_enrich to save LLM-generated descriptions.
+    """
+    try:
+        import json as _json
+        items = _json.loads(descriptions)
+        if not isinstance(items, list):
+            return "Error: expected a JSON array of {target, description} objects."
+
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+
+        def _batch_update() -> tuple[int, int]:
+            updated = 0
+            skipped = 0
+            for item in items:
+                target = item.get("target", "")
+                desc = item.get("description", "")
+                if not target or not desc:
+                    skipped += 1
+                    continue
+
+                file_part, symbol_name = split_target(target)
+                if file_part is not None:
+                    file_norm = file_part.replace("\\", "/")
+                    file_escaped = escape_like(file_norm)
+                    cnt = conn.execute(
+                        "UPDATE symbols SET description = ?, description_manual = 1 "
+                        "WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') "
+                        "AND symbol_name = ?",
+                        (desc, file_norm, f"%/{file_escaped}", symbol_name),
+                    ).rowcount
+                else:
+                    cnt = conn.execute(
+                        "UPDATE symbols SET description = ?, description_manual = 1 "
+                        "WHERE symbol_name = ?",
+                        (desc, symbol_name),
+                    ).rowcount
+                if cnt:
+                    updated += cnt
+                else:
+                    skipped += 1
+            conn.commit()
+            return updated, skipped
+
+        async with lock:
+            updated, skipped = await asyncio.to_thread(_batch_update)
+
+        result = f"Updated {updated} symbol(s)."
+        if skipped:
+            result += f" Skipped {skipped} (not found or empty)."
+        return result
+    except Exception as e:
+        return _handle_error(e)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

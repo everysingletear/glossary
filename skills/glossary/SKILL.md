@@ -84,6 +84,25 @@ Set a 1-line description on a symbol. Format: `file_path:symbol_name` or just `s
 Initialize or rebuild the database. Scans all source files, creates `.claude/glossary.db`, adds to `.gitignore`.
 **When to use:** Once per project, or after branch switches / major refactors.
 
+### `glossary_enrich(file_path?, symbol_type?, limit?, context_lines?)`
+Returns undescribed symbols with source code context. The scanner extracts docstrings/JSDoc automatically — this tool covers the rest. You read the source snippets, generate 1-line descriptions, and save them with `glossary_describe_batch`.
+**When to use:** After `glossary_init` on a new project, or when you notice symbols without descriptions.
+
+### `glossary_describe_batch(descriptions)`
+Save multiple descriptions in one call. Takes a JSON array: `[{"target": "file:symbol", "description": "..."}]`.
+**When to use:** After `glossary_enrich` — to save LLM-generated descriptions.
+
+## Enrichment workflow
+
+After `glossary_init`, many symbols may lack descriptions (the scanner only extracts docstrings/JSDoc). Fill them in:
+
+1. Call `glossary_enrich()` — returns up to 20 undescribed symbols with source context
+2. Read the source snippets and generate a 1-line description for each (max 100 tokens)
+3. Call `glossary_describe_batch` with the JSON array of descriptions
+4. Repeat until `glossary_enrich` returns "All symbols already have descriptions"
+
+**When working with files:** if you edit or read code and understand a symbol that has no description, add one immediately via `glossary_describe`. Don't wait for a batch — enrich as you go.
+
 ## When to query
 
 ### Before creating any new symbol
@@ -127,6 +146,4 @@ The plugin auto-configures the MCP server. For manual setup, see the README.
 
 **Symbols inside functions.** Only module/class level declarations are indexed. Variables declared inside function bodies are not captured (too noisy, rarely needed for naming collision checks).
 
-**Large files (>500KB) are skipped.** Files over 500KB (generated code, schema dumps, bundled output) are silently excluded from scanning. This is intentional — such files are rarely relevant for naming collision checks and would slow down the scanner.
-
-**Dynamic symbols.** Dynamically generated symbols (e.g., `setattr`, `__all__` re-exports, decorator-generated attributes) are not indexed — the scanner only tracks statically declared names.
+**Dynamic symbols.** Dynamically generated symbols (e.g., `setattr`, `__all__` re-exports, decorator-generated attributes) are not indexed — static analysis cannot resolve runtime symbol creation.

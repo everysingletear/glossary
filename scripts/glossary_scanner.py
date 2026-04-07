@@ -353,9 +353,26 @@ def parse_python(source: str, file_path: str) -> list[dict]:
 
         for item in node.body:
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Detect decorator-based symbol types
+                dec_names = []
+                for d in item.decorator_list:
+                    if isinstance(d, ast.Name):
+                        dec_names.append(d.id)
+                    elif isinstance(d, ast.Attribute):
+                        dec_names.append(d.attr)
+
+                if "property" in dec_names:
+                    sym_type = "property"
+                elif "staticmethod" in dec_names:
+                    sym_type = "staticmethod"
+                elif "classmethod" in dec_names:
+                    sym_type = "classmethod"
+                else:
+                    sym_type = "method"
+
                 symbols.append({
                     "name": item.name,
-                    "type": "method",
+                    "type": sym_type,
                     "signature": _func_signature(item),
                     "parent": node.name,
                     "line": item.lineno,
@@ -836,9 +853,6 @@ def parse_file(file_path: str, project_root: str) -> tuple[list[dict], str] | No
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             source = f.read()
     except (OSError, IOError):
-        return None
-
-    if len(source) > 500_000:
         return None
 
     lang = LANGUAGE_MAP.get(ext)
