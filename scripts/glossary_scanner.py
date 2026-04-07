@@ -111,6 +111,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             parent TEXT,
             line_number INTEGER,
             description TEXT,
+            description_manual INTEGER DEFAULT 0,
             is_test INTEGER DEFAULT 0,
             is_migration INTEGER DEFAULT 0
         );
@@ -145,6 +146,12 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE files ADD COLUMN is_test INTEGER DEFAULT 0")
         conn.execute("ALTER TABLE files ADD COLUMN is_migration INTEGER DEFAULT 0")
 
+    # Migration: add description_manual flag
+    try:
+        conn.execute("SELECT description_manual FROM symbols LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE symbols ADD COLUMN description_manual INTEGER DEFAULT 0")
+
     return conn
 
 
@@ -160,15 +167,15 @@ def upsert_file_symbols(conn: sqlite3.Connection, file_path: str,
     """Replace all symbols for a file atomically."""
     is_test, is_migration = classify_file(file_path)
 
-    # Preserve existing descriptions
-    existing = {}
+    # Preserve manual descriptions (set via glossary_describe)
+    manual_descs = {}
     for row in conn.execute(
-        "SELECT symbol_name, parent, description FROM symbols WHERE file_path = ?",
+        "SELECT symbol_name, parent, description FROM symbols "
+        "WHERE file_path = ? AND description_manual = 1",
         (file_path,)
     ):
         key = (row[0], row[1])
-        if row[2]:
-            existing[key] = row[2]
+        manual_descs[key] = row[2]
 
     # Wrap delete+re-insert in an explicit transaction so a crash between
     # them doesn't leave the file with zero symbols until the next scan.
@@ -177,14 +184,21 @@ def upsert_file_symbols(conn: sqlite3.Connection, file_path: str,
         conn.execute("DELETE FROM symbols WHERE file_path = ?", (file_path,))
 
         for sym in symbols:
-            desc = existing.get((sym["name"], sym.get("parent")))
+            key = (sym["name"], sym.get("parent"))
+            if key in manual_descs:
+                desc = manual_descs[key]
+                desc_manual = 1
+            else:
+                desc = sym.get("description")
+                desc_manual = 0
             conn.execute(
                 """INSERT INTO symbols
                    (file_path, symbol_name, symbol_type, signature, parent,
-                    line_number, description, is_test, is_migration)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    line_number, description, description_manual,
+                    is_test, is_migration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_path, sym["name"], sym["type"], sym.get("signature"),
-                 sym.get("parent"), sym.get("line"), desc,
+                 sym.get("parent"), sym.get("line"), desc, desc_manual,
                  int(is_test), int(is_migration))
             )
 
@@ -247,6 +261,24 @@ def should_scan(conn: sqlite3.Connection, file_path: str, mtime: float) -> bool:
 # ---------------------------------------------------------------------------
 # Python parser (ast)
 # ---------------------------------------------------------------------------
+
+def _extract_docstring(node) -> str | None:
+    """Extract the first line of a docstring from an AST node.
+
+    Returns a trimmed single-line summary (max 200 chars), or None.
+    Works for FunctionDef, AsyncFunctionDef, ClassDef, and Module nodes.
+    """
+    doc = ast.get_docstring(node)
+    if not doc:
+        return None
+    # Take first non-empty line
+    first_line = doc.strip().split("\n")[0].strip()
+    if not first_line:
+        return None
+    if len(first_line) > 200:
+        first_line = first_line[:197] + "..."
+    return first_line
+
 
 def parse_python(source: str, file_path: str) -> list[dict]:
     """Extract symbols from Python source using the ast module."""
@@ -316,6 +348,7 @@ def parse_python(source: str, file_path: str) -> list[dict]:
             "signature": sig,
             "parent": parent,
             "line": node.lineno,
+            "description": _extract_docstring(node),
         })
 
         for item in node.body:
@@ -326,6 +359,7 @@ def parse_python(source: str, file_path: str) -> list[dict]:
                     "signature": _func_signature(item),
                     "parent": node.name,
                     "line": item.lineno,
+                    "description": _extract_docstring(item),
                 })
             elif isinstance(item, ast.ClassDef):
                 _visit_class(item, parent=node.name)
@@ -382,6 +416,7 @@ def parse_python(source: str, file_path: str) -> list[dict]:
                 "signature": _func_signature(node),
                 "parent": None,
                 "line": node.lineno,
+                "description": _extract_docstring(node),
             })
         elif isinstance(node, ast.ClassDef):
             _visit_class(node)
@@ -469,6 +504,43 @@ _JS_METHOD_SKIP = {"if", "for", "while", "switch", "catch", "return", "throw",
                    "const", "let", "var", "class", "function", "else"}
 
 
+_JSDOC_PATTERN = re.compile(r"/\*\*([\s\S]*?)\*/")
+
+
+def _extract_jsdoc(source: str, decl_start: int) -> str | None:
+    """Extract first line of a JSDoc comment immediately before a declaration.
+
+    Looks backwards from *decl_start* for a /** ... */ block, skipping only
+    whitespace between the closing */ and the declaration.
+    Returns a trimmed single-line summary (max 200 chars), or None.
+    """
+    # Look at the 500 chars before the declaration for a JSDoc block
+    search_start = max(0, decl_start - 500)
+    region = source[search_start:decl_start]
+    # Find the last JSDoc block in the region
+    matches = list(_JSDOC_PATTERN.finditer(region))
+    if not matches:
+        return None
+    last = matches[-1]
+    # Ensure only whitespace between end of JSDoc and declaration
+    between = region[last.end():]
+    if between.strip():
+        return None
+    body = last.group(1)
+    # Strip leading * from each line, take first non-empty line
+    lines = []
+    for line in body.split("\n"):
+        cleaned = line.strip().lstrip("*").strip()
+        if cleaned and not cleaned.startswith("@"):
+            lines.append(cleaned)
+    if not lines:
+        return None
+    first_line = lines[0]
+    if len(first_line) > 200:
+        first_line = first_line[:197] + "..."
+    return first_line
+
+
 def parse_javascript(source: str, file_path: str) -> list[dict]:
     """Extract symbols from JS/TS source using regex patterns."""
     symbols = []
@@ -497,6 +569,7 @@ def parse_javascript(source: str, file_path: str) -> list[dict]:
                 "signature": full_match if sym_type == "fn" else name,
                 "parent": None,
                 "line": line_num,
+                "description": _extract_jsdoc(source, match.start()),
             })
 
     # --- Class methods ---
@@ -542,6 +615,7 @@ def parse_javascript(source: str, file_path: str) -> list[dict]:
                 "signature": sig,
                 "parent": class_name,
                 "line": method_line,
+                "description": _extract_jsdoc(class_body, method_match.start()),
             })
 
     symbols.sort(key=lambda s: s.get("line", 0))
