@@ -72,11 +72,10 @@ def format_symbol(sym: sqlite3.Row, verbose: bool = False, indent: int = 0) -> s
     """Format a single symbol as a compact line."""
     prefix = "  " * indent + "- "
     sig = sym["signature"] or sym["symbol_name"]
-    line = f"{prefix}`{sig}` — {sym['symbol_type']}"
+    ln = f"  (L{sym['line_number']})" if sym["line_number"] else ""
+    line = f"{prefix}`{sig}` — {sym['symbol_type']}{ln}"
     if sym["description"]:
         line += f" — {sym['description']}"
-    if verbose and sym["line_number"]:
-        line += f"  (L{sym['line_number']})"
     return line
 
 
