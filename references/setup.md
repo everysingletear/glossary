@@ -130,3 +130,23 @@ Run without arguments for full usage help. This is a direct SQLite CLI — usefu
 - Stored at `<project-root>/.claude/glossary.db`
 - Auto-added to `.gitignore` during initialization
 - Regenerable — safe to delete and re-init
+
+## Troubleshooting
+
+### MCP server not starting
+- **`ModuleNotFoundError: No module named 'mcp'`** — The MCP package was installed into a different Python than the one running the server. Check: `python -c "import mcp; print(mcp.__file__)"` using the same interpreter from `settings.json`.
+- **Server starts but no tools appear** — Verify the path in `settings.json` points to `glossary_server.py`, not the skill directory. Restart Claude Code after changing MCP settings.
+
+### Hook doesn't fire
+- **Matcher typo** — Must be exactly `Edit|Write` (case-sensitive). Check `.claude/settings.json` for typos.
+- **Wrong script path** — Hook runs from project root CWD. Use absolute path to `glossary_scanner.py`.
+- **No file_path in stdin** — The hook reads `file_path` from the tool's JSON input. If using a custom tool not listed in the matcher, its input may not contain `file_path`.
+
+### Database seems stale
+- **After git operations** — Run `glossary_init` after branch switches, merges, or rebases.
+- **After file deletion** — The hook only fires on Edit/Write. Deleted files leave orphan entries until the next `glossary_init`.
+- **Check last scan time** — `glossary_stats` shows when each file was last scanned.
+
+### Database not found
+- **No `.claude/` directory** — Run `glossary_init` or `glossary_scanner.py --init` from the project root.
+- **Wrong project root** — The server detects project root from CWD using markers (.git, pyproject.toml, etc.). If no marker found, it falls back to CWD with a warning.
