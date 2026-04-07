@@ -7,6 +7,7 @@ Extracted to avoid duplication across modules (DRY).
 
 import os
 import sqlite3
+import sys
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,12 @@ def find_project_root(start: str | None = None) -> str:
                 return current
         parent = os.path.dirname(current)
         if parent == current:
-            return os.path.abspath(start or os.getcwd())
+            fallback = os.path.abspath(start or os.getcwd())
+            print(
+                f"Warning: No project marker found. Using {fallback} as project root.",
+                file=sys.stderr,
+            )
+            return fallback
         current = parent
 
 
