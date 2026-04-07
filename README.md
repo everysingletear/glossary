@@ -57,7 +57,7 @@ pip install mcp pydantic
 }
 ```
 
-4. (Optional) Add the auto-update hook to `~/.claude/settings.json`:
+4. Add the auto-update hook to `~/.claude/settings.json` (required — keeps the DB current after every edit):
 ```json
 {
   "hooks": {
@@ -75,6 +75,8 @@ pip install mcp pydantic
   }
 }
 ```
+
+> **Note:** When installed as a plugin, the hook is configured automatically via `hooks/hooks.json` — no manual setup needed.
 
 ## How it works
 

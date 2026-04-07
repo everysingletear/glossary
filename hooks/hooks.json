@@ -1,0 +1,17 @@
+{
+  "description": "Glossary auto-update: re-scans edited files to keep the symbol database current",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${CLAUDE_PLUGIN_ROOT}\"; [ -z \"$_R\" ] && _R=\"$(dirname \"$(dirname \"$0\")\")\" ; python \"$_R/scripts/glossary_scanner.py\" --stdin",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
