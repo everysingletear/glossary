@@ -1,0 +1,92 @@
+{
+  "skill_name": "glossary",
+  "evals": [
+    {
+      "id": 0,
+      "name": "check-before-naming",
+      "prompt": "I want to add a new class called LLMLogger to the reMind project that will handle logging of all LLM API calls. Before I start, check if there's anything with a similar name already in the codebase. The project is at g:/python_projects/reMind",
+      "expected_output": "Should find the existing LLMLogger class in backend/app/llm_logger.py and warn about the naming conflict, suggesting an alternative name",
+      "files": [],
+      "assertions": [
+        {
+          "name": "found-existing-llmlogger",
+          "type": "output_contains",
+          "check": "The output mentions that LLMLogger already exists in the codebase"
+        },
+        {
+          "name": "identified-file-location",
+          "type": "output_contains",
+          "check": "The output identifies llm_logger.py as the file containing the existing LLMLogger"
+        },
+        {
+          "name": "suggested-alternative",
+          "type": "output_contains",
+          "check": "The output suggests an alternative name or warns about the conflict"
+        },
+        {
+          "name": "token-efficiency",
+          "type": "qualitative",
+          "check": "Used glossary search or similar lightweight approach instead of reading multiple source files"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "session-start-orientation",
+      "prompt": "I'm starting a new session working on the reMind project at g:/python_projects/reMind. I need to work on the backend API routes. Give me an overview of the backend structure — what are the main classes, routers, and services?",
+      "expected_output": "Should provide a structured overview of backend symbols organized by module, showing routers, services, models, and key functions without reading every source file",
+      "files": [],
+      "assertions": [
+        {
+          "name": "covered-routers",
+          "type": "output_contains",
+          "check": "The output lists the router modules (auth, ai, billing, maps, etc.)"
+        },
+        {
+          "name": "covered-models",
+          "type": "output_contains",
+          "check": "The output mentions key model classes (User, MindMap, Node, etc.)"
+        },
+        {
+          "name": "covered-services",
+          "type": "output_contains",
+          "check": "The output mentions service modules or classes"
+        },
+        {
+          "name": "structured-output",
+          "type": "qualitative",
+          "check": "Output is organized by module/area, not a random dump"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "find-related-symbols",
+      "prompt": "I need to add a new authentication middleware to the reMind project at g:/python_projects/reMind. Before writing it, show me all existing auth-related functions and classes so I understand what's already there and can integrate properly.",
+      "expected_output": "Should find auth-related symbols across multiple files (auth.py, mcp_auth.py, oauth.py, etc.) and present them in a useful way",
+      "files": [],
+      "assertions": [
+        {
+          "name": "found-auth-module",
+          "type": "output_contains",
+          "check": "The output covers symbols from backend/app/auth.py"
+        },
+        {
+          "name": "found-mcp-auth",
+          "type": "output_contains",
+          "check": "The output covers symbols from mcp_auth.py or mentions McpBearerAuthMiddleware"
+        },
+        {
+          "name": "found-auth-functions",
+          "type": "output_contains",
+          "check": "The output mentions key auth functions like get_current_user, hash_password, or verify_password"
+        },
+        {
+          "name": "comprehensive-coverage",
+          "type": "qualitative",
+          "check": "Found auth symbols across multiple files, not just one"
+        }
+      ]
+    }
+  ]
+}

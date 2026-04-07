@@ -1,0 +1,794 @@
+#!/usr/bin/env python3
+"""
+Glossary MCP Server — exposes glossary operations as native MCP tools.
+
+LLM calls these tools directly, no Bash needed. The scanner hook
+keeps the database updated automatically; this server handles queries
+and descriptions.
+
+Run:
+    python glossary_server.py
+    # or via Claude Code settings.json mcpServers config
+"""
+
+import asyncio
+import os
+import sqlite3
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from io import StringIO
+from typing import Annotated, Literal
+
+from mcp.server.fastmcp import FastMCP, Context
+from pydantic import Field
+
+from glossary_common import (
+    DB_RELATIVE_PATH,
+    _DUP_WHERE,
+    escape_like,
+    find_project_root,
+    format_file_group,
+    format_symbol,
+    group_by_file,
+    split_target,
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SCANNER_FILENAME = "glossary_scanner.py"
+
+SymbolType = Literal["fn", "class", "method", "var", "const", "interface", "type", "enum"]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_db_path() -> str:
+    return os.path.join(find_project_root(), DB_RELATIVE_PATH)
+
+
+def _get_scanner_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), SCANNER_FILENAME)
+
+
+def _handle_error(e: Exception) -> str:
+    """Consistent error formatting with actionable messages."""
+    if isinstance(e, FileNotFoundError):
+        return str(e)
+    if isinstance(e, sqlite3.OperationalError):
+        return (
+            f"Error: Database operation failed — {e}. "
+            "The database may be corrupted; try glossary_init to rebuild."
+        )
+    return f"Error: {type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Lifespan: open DB connection once, reuse across tool calls
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def glossary_lifespan(server: FastMCP):
+    """Initialize DB connection on startup; auto-init if DB doesn't exist."""
+    db_path = _get_db_path()
+
+    if not os.path.exists(db_path):
+        scanner = _get_scanner_path()
+        root = find_project_root()
+        if os.path.exists(scanner):
+            await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, scanner, "--project-root", root, "--init"],
+                capture_output=True, text=True,
+            )
+
+    conn = None
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+
+    # Single lock serializes ALL database access through asyncio.to_thread,
+    # preventing concurrent threads from sharing the same sqlite3 connection.
+    db_lock = asyncio.Lock()
+
+    state = {"db": conn, "project_root": find_project_root(), "db_lock": db_lock}
+
+    try:
+        yield state
+    finally:
+        # Close whatever connection is in state — may have been replaced by glossary_init.
+        final_conn = state.get("db")
+        if final_conn:
+            final_conn.close()
+
+
+def _get_db(ctx: Context) -> sqlite3.Connection:
+    """Get DB connection from lifespan state, reconnect if needed."""
+    conn = ctx.request_context.lifespan_state.get("db")
+    if conn is None:
+        db_path = _get_db_path()
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(
+                f"Glossary database not found at {db_path}. "
+                "Use the glossary_init tool to create it, "
+                "or check that you're running from inside a project directory."
+            )
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        ctx.request_context.lifespan_state["db"] = conn
+    return conn
+
+
+def _get_lock(ctx: Context) -> asyncio.Lock:
+    """Return the database lock from lifespan state."""
+    return ctx.request_context.lifespan_state.get("db_lock") or asyncio.Lock()
+
+
+# ---------------------------------------------------------------------------
+# MCP Server
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP(
+    "glossary_mcp",
+    instructions=(
+        "Glossary: a persistent symbol registry for the codebase. "
+        "Use glossary_search before naming new symbols to avoid collisions. "
+        "Use glossary_stats or glossary_full at session start to orient yourself. "
+        "Use glossary_file to see what's in a file without reading source code."
+    ),
+    lifespan=glossary_lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="glossary_search",
+    annotations={
+        "title": "Search Symbols",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_search(
+    pattern: Annotated[str, Field(
+        description="Symbol name pattern. Use * as wildcard (e.g. 'process_*', '*Logger*', 'get_*').",
+        min_length=1,
+    )],
+    verbose: Annotated[bool, Field(
+        description="Include line numbers in output.",
+    )] = False,
+    limit: Annotated[int, Field(
+        ge=1, le=1000,
+        description="Maximum number of results to return.",
+    )] = 100,
+    offset: Annotated[int, Field(
+        ge=0,
+        description="Number of results to skip (for pagination).",
+    )] = 0,
+    ctx: Context = None,
+) -> str:
+    """Search symbols by name with wildcard support.
+
+    Use * wildcards to match symbol names (e.g. 'process_*', '*Logger*', 'get_*_by_id').
+    Always search before creating new functions or classes to check for naming conflicts.
+
+    Returns matching symbols grouped by file with type and signature.
+    """
+    try:
+        conn = _get_db(ctx)
+        sql_pattern = escape_like(pattern).replace("*", "%")
+        lock = _get_lock(ctx)
+
+        def _query() -> list[sqlite3.Row]:
+            return conn.execute(
+                """SELECT * FROM symbols
+                   WHERE symbol_name LIKE ? ESCAPE '\\'
+                   ORDER BY file_path, line_number
+                   LIMIT ? OFFSET ?""",
+                (sql_pattern, limit, offset),
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            return f"No symbols matching '{pattern}'"
+
+        out = StringIO()
+        suffix = f" (offset {offset})" if offset > 0 else ""
+        out.write(f"Found {len(rows)} symbols matching '{pattern}'{suffix}:\n")
+        for fp, syms in sorted(group_by_file(rows).items()):
+            out.write(format_file_group(fp, syms, verbose))
+            out.write("\n")
+        if len(rows) == limit:
+            out.write(f"\n(Showing first {limit}; pass offset={offset + limit} for more)\n")
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_file",
+    annotations={
+        "title": "Symbols In File",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_file(
+    file_path: Annotated[str, Field(
+        description="File path or partial name (e.g. 'auth.py' matches 'backend/app/auth.py').",
+        min_length=1,
+    )],
+    verbose: Annotated[bool, Field(
+        description="Include line numbers in output.",
+    )] = False,
+    ctx: Context = None,
+) -> str:
+    """Show all symbols declared in a specific file.
+
+    Accepts partial paths (e.g. 'auth.py' matches 'backend/app/auth.py').
+    When multiple files match, all are shown.
+    Much cheaper than reading the source — use this to see what exists
+    before reading implementation details.
+    """
+    try:
+        conn = _get_db(ctx)
+        normalized = file_path.replace("\\", "/")
+        lock = _get_lock(ctx)
+
+        def _query() -> list[sqlite3.Row]:
+            escaped = escape_like(normalized)
+            return conn.execute(
+                "SELECT * FROM symbols WHERE file_path = ? OR file_path LIKE ? ESCAPE '\\' ORDER BY file_path, line_number",
+                (normalized, f"%/{escaped}"),
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            return f"No symbols found in '{file_path}'. Check the path or run glossary_init."
+
+        by_file = group_by_file(rows)
+        out = StringIO()
+        for fp, syms in by_file.items():
+            out.write(format_file_group(fp, syms, verbose))
+            out.write("\n")
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_type",
+    annotations={
+        "title": "Symbols By Type",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_type(
+    symbol_type: Annotated[SymbolType, Field(
+        description="Symbol type: fn, class, method, var, const, interface, type, or enum.",
+    )],
+    verbose: Annotated[bool, Field(
+        description="Include line numbers in output.",
+    )] = False,
+    limit: Annotated[int, Field(
+        ge=1, le=1000,
+        description="Maximum number of results to return.",
+    )] = 200,
+    offset: Annotated[int, Field(
+        ge=0,
+        description="Number of results to skip (for pagination).",
+    )] = 0,
+    ctx: Context = None,
+) -> str:
+    """Show all symbols of a given type across the project.
+
+    Valid types: fn, class, method, var, const, interface, type, enum.
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+
+        def _query() -> list[sqlite3.Row]:
+            return conn.execute(
+                """SELECT * FROM symbols
+                   WHERE symbol_type = ?
+                   ORDER BY file_path, line_number
+                   LIMIT ? OFFSET ?""",
+                (symbol_type, limit, offset),
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            return (
+                f"No symbols of type '{symbol_type}'. "
+                "Valid types: fn, class, method, var, const, interface, type, enum."
+            )
+
+        out = StringIO()
+        suffix = f" (offset {offset})" if offset > 0 else ""
+        out.write(f"All {symbol_type} symbols ({len(rows)} shown{suffix}):\n")
+        for fp, syms in sorted(group_by_file(rows).items()):
+            out.write(format_file_group(fp, syms, verbose))
+            out.write("\n")
+        if len(rows) == limit:
+            out.write(f"\n(Showing first {limit}; pass offset={offset + limit} for more)\n")
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_duplicates",
+    annotations={
+        "title": "Find Duplicate Names",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_duplicates(
+    include_tests: Annotated[bool, Field(
+        description="Include symbols from test files (excluded by default).",
+    )] = False,
+    include_migrations: Annotated[bool, Field(
+        description="Include symbols from migration files (excluded by default).",
+    )] = False,
+    verbose: Annotated[bool, Field(
+        description="Include line numbers for each location.",
+    )] = False,
+    ctx: Context = None,
+) -> str:
+    """Find symbols with the same name AND type in different files.
+
+    Tests and migrations are excluded by default because they naturally
+    repeat names (setup, teardown, upgrade, downgrade). Use include_tests
+    or include_migrations to see those too.
+    """
+    try:
+        conn = _get_db(ctx)
+        where = _DUP_WHERE[(include_tests, include_migrations)]
+        lock = _get_lock(ctx)
+
+        def _query():
+            agg_rows = conn.execute(
+                f"""SELECT symbol_name, symbol_type, COUNT(DISTINCT file_path) as file_count
+                   FROM symbols WHERE {where}
+                   GROUP BY symbol_name, symbol_type
+                   HAVING file_count > 1
+                   ORDER BY file_count DESC, symbol_name"""
+            ).fetchall()
+
+            details = {}
+            for r in agg_rows:
+                locations = conn.execute(
+                    f"""SELECT file_path, signature, line_number
+                        FROM symbols
+                        WHERE symbol_name = ? AND symbol_type = ? AND {where}
+                        ORDER BY file_path""",
+                    (r["symbol_name"], r["symbol_type"]),
+                ).fetchall()
+                details[(r["symbol_name"], r["symbol_type"])] = locations
+
+            return agg_rows, details
+
+        async with lock:
+            agg_rows, details = await asyncio.to_thread(_query)
+
+        if not agg_rows:
+            return "No duplicate symbol names found."
+
+        out = StringIO()
+        filters = []
+        if not include_tests:
+            filters.append("tests")
+        if not include_migrations:
+            filters.append("migrations")
+        suffix = f" (excluding {', '.join(filters)})" if filters else ""
+        out.write(f"Found {len(agg_rows)} duplicate symbol names{suffix}:\n\n")
+
+        for r in agg_rows:
+            out.write(f"### `{r['symbol_name']}` ({r['symbol_type']}) — in {r['file_count']} files\n")
+            for loc in details[(r["symbol_name"], r["symbol_type"])]:
+                sig = loc["signature"] or r["symbol_name"]
+                line_info = f" (L{loc['line_number']})" if verbose and loc["line_number"] else ""
+                out.write(f"  - {loc['file_path']}: `{sig}`{line_info}\n")
+            out.write("\n")
+
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_stats",
+    annotations={
+        "title": "Glossary Stats",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_stats(ctx: Context = None) -> str:
+    """Quick overview — file count, symbol count by type and language.
+
+    Cheapest query available. Use at session start or after context compaction
+    to understand the project scope before diving into specific files.
+    Includes staleness indicator so you know when the database was last updated.
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+
+        def _query():
+            file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            sym_count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+            described = conn.execute(
+                "SELECT COUNT(*) FROM symbols WHERE description IS NOT NULL"
+            ).fetchone()[0]
+            test_files = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE is_test = 1"
+            ).fetchone()[0]
+            migration_files = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE is_migration = 1"
+            ).fetchone()[0]
+            last_scan = conn.execute(
+                "SELECT MAX(last_scanned) FROM files"
+            ).fetchone()[0]
+            type_counts = conn.execute(
+                """SELECT symbol_type, COUNT(*) as cnt FROM symbols
+                   GROUP BY symbol_type ORDER BY cnt DESC"""
+            ).fetchall()
+            lang_counts = conn.execute(
+                """SELECT language, COUNT(*) as cnt, SUM(symbol_count) as syms
+                   FROM files GROUP BY language ORDER BY cnt DESC"""
+            ).fetchall()
+            return (file_count, sym_count, described, test_files,
+                    migration_files, last_scan, type_counts, lang_counts)
+
+        async with lock:
+            (file_count, sym_count, described, test_files,
+             migration_files, last_scan, type_counts, lang_counts) = await asyncio.to_thread(_query)
+
+        out = StringIO()
+        out.write(f"Glossary: {sym_count} symbols in {file_count} files\n")
+        if last_scan:
+            out.write(f"Last updated: {last_scan}\n")
+        else:
+            out.write("Last updated: never (run glossary_init)\n")
+        if described > 0:
+            out.write(f"Described: {described}/{sym_count}\n")
+        if test_files > 0:
+            out.write(f"Test files: {test_files}\n")
+        if migration_files > 0:
+            out.write(f"Migration files: {migration_files}\n")
+        out.write("\nBy type:\n")
+        for r in type_counts:
+            out.write(f"  {r['symbol_type']:12s} {r['cnt']}\n")
+        out.write("\nBy language:\n")
+        for r in lang_counts:
+            lang = r["language"] or "unknown"
+            out.write(f"  {lang:12s} {r['cnt']} files, {r['syms']} symbols\n")
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_recent",
+    annotations={
+        "title": "Recently Changed Symbols",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_recent(
+    limit: Annotated[int, Field(
+        ge=1, le=50,
+        description="Number of recently scanned files to show (default 5). Returns all symbols from each file.",
+    )] = 5,
+    verbose: Annotated[bool, Field(
+        description="Include line numbers in output.",
+    )] = False,
+    ctx: Context = None,
+) -> str:
+    """Show symbols from the most recently scanned files.
+
+    Useful when resuming work mid-session to see what was touched last,
+    or to verify that the hook-based scanner is keeping the database current.
+    Returns complete files (not a symbol-count cutoff) so you always see
+    full context.
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+
+        def _query() -> list[sqlite3.Row]:
+            recent_files = conn.execute(
+                "SELECT file_path FROM files ORDER BY last_scanned DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            if not recent_files:
+                return []
+            fps = [r["file_path"] for r in recent_files]
+            placeholders = ",".join("?" * len(fps))
+            return conn.execute(
+                f"""SELECT s.*, f.last_scanned FROM symbols s
+                   JOIN files f ON s.file_path = f.file_path
+                   WHERE s.file_path IN ({placeholders})
+                   ORDER BY f.last_scanned DESC, s.line_number""",
+                fps,
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            return "No recently scanned symbols."
+
+        out = StringIO()
+        by_file = group_by_file(rows)
+        out.write(f"Last {len(by_file)} scanned file(s):\n")
+        for fp, syms in by_file.items():
+            out.write(format_file_group(fp, syms, verbose))
+            out.write("\n")
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_full",
+    annotations={
+        "title": "Full Glossary Dump",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_full(
+    verbose: Annotated[bool, Field(
+        description=(
+            "Show full signatures and line numbers. "
+            "Also bypasses compact format on large projects — use to force full output."
+        ),
+    )] = False,
+    limit: Annotated[int, Field(
+        ge=1, le=10000,
+        description="Maximum number of symbols to return (default 5000).",
+    )] = 5000,
+    offset: Annotated[int, Field(
+        ge=0,
+        description="Number of symbols to skip for pagination.",
+    )] = 0,
+    ctx: Context = None,
+) -> str:
+    """Full glossary dump — every symbol in the project.
+
+    For large projects (200+ symbols), auto-switches to compact format
+    showing top-level symbols as name(type) per file (methods are hidden
+    to save tokens). Pass verbose=True to force full signatures, line numbers,
+    and all methods regardless of project size.
+    Use limit/offset for pagination on very large projects (5000+ symbols).
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+
+        def _query() -> list[sqlite3.Row]:
+            return conn.execute(
+                "SELECT * FROM symbols ORDER BY file_path, line_number LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+        async with lock:
+            rows = await asyncio.to_thread(_query)
+
+        if not rows:
+            return "Glossary is empty. Use glossary_init to populate."
+
+        by_file = group_by_file(rows)
+        total = len(rows)
+        file_count = len(by_file)
+        sorted_files = sorted(by_file.keys())
+
+        out = StringIO()
+        suffix = f" (offset {offset})" if offset > 0 else ""
+        out.write(f"# Full Glossary ({total} symbols in {file_count} files{suffix})\n\n")
+        if total == limit:
+            out.write(f"(Showing first {limit}; pass offset={offset + limit} for more)\n\n")
+
+        if not verbose and total > 200:
+            out.write("(Compact mode: top-level symbols only; pass verbose=True for methods)\n\n")
+            for i, fp in enumerate(sorted_files):
+                if ctx and i % 20 == 0:
+                    await ctx.report_progress(i, file_count)
+                syms = by_file[fp]
+                top_level = [s for s in syms if not s["parent"]]
+                parts = [f"{s['symbol_name']}({s['symbol_type']})" for s in top_level]
+                out.write(f"**{fp}** — {', '.join(parts)}\n")
+        else:
+            for i, fp in enumerate(sorted_files):
+                if ctx and i % 20 == 0:
+                    await ctx.report_progress(i, file_count)
+                out.write(format_file_group(fp, by_file[fp], verbose=verbose))
+                out.write("\n")
+
+        return out.getvalue()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_describe",
+    annotations={
+        "title": "Add Symbol Description",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_describe(
+    target: Annotated[str, Field(
+        description=(
+            "Symbol to describe. Format: 'file_path:symbol_name' or just 'symbol_name'. "
+            "Windows paths are handled correctly (C:\\path\\file.py:func_name works)."
+        ),
+        min_length=1,
+    )],
+    description: Annotated[str, Field(
+        description="One-line description of what this symbol does.",
+        min_length=1,
+        max_length=200,
+    )],
+    ctx: Context = None,
+) -> str:
+    """Set a 1-line description on a symbol.
+
+    Target format: 'file_path:symbol_name' or just 'symbol_name'.
+    Only describe ambiguous names (run, handle, process) — clear names
+    like get_user_by_id don't need descriptions.
+    Calling again with a different description replaces the previous one.
+    """
+    try:
+        conn = _get_db(ctx)
+        lock = _get_lock(ctx)
+        file_part, symbol_name = split_target(target)
+
+        def _update() -> tuple[int, list[str]]:
+            if file_part is not None:
+                file_norm = file_part.replace("\\", "/")
+                file_escaped = escape_like(file_norm)
+                affected = conn.execute(
+                    "SELECT file_path FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?",
+                    (file_norm, f"%/{file_escaped}", symbol_name),
+                ).fetchall()
+                if not affected:
+                    return 0, []
+                updated = conn.execute(
+                    "UPDATE symbols SET description = ? WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?",
+                    (description, file_norm, f"%/{file_escaped}", symbol_name),
+                ).rowcount
+                conn.commit()
+                return updated, [r["file_path"] for r in affected]
+            else:
+                updated = conn.execute(
+                    "UPDATE symbols SET description = ? WHERE symbol_name = ?",
+                    (description, symbol_name),
+                ).rowcount
+                conn.commit()
+                return updated, []
+
+        async with lock:
+            updated, paths = await asyncio.to_thread(_update)
+
+        if updated:
+            if paths:
+                return f"Updated description for '{symbol_name}' in: {', '.join(paths)}"
+            return f"Updated description for '{target}' ({updated} row(s))"
+        return f"Symbol '{target}' not found. Check the name with glossary_search."
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="glossary_init",
+    annotations={
+        "title": "Initialize Glossary",
+        "readOnlyHint": False,
+        "destructiveHint": True,   # rebuilds all symbol rows (descriptions are preserved)
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def glossary_init(ctx: Context = None) -> str:
+    """Initialize or rebuild the glossary database.
+
+    Scans all source files in the project, creates .claude/glossary.db,
+    and adds it to .gitignore. Run once per project, or after branch
+    switches and major refactors. Safe to re-run — existing descriptions
+    are preserved across rebuilds.
+    """
+    try:
+        scanner = _get_scanner_path()
+        root = find_project_root()
+
+        if not os.path.exists(scanner):
+            return f"Error: Scanner not found at {scanner}."
+
+        if ctx:
+            await ctx.report_progress(0, 3)
+
+        lock = _get_lock(ctx)
+
+        def _run_scanner():
+            return subprocess.run(
+                [sys.executable, scanner, "--project-root", root, "--init"],
+                capture_output=True, text=True,
+            )
+
+        async with lock:
+            result = await asyncio.to_thread(_run_scanner)
+
+        if result.returncode != 0:
+            return f"Error: Scanner failed — {result.stderr.strip()}"
+
+        if ctx:
+            await ctx.report_progress(2, 3)
+
+        # Reconnect: the scanner recreated the DB, so the old connection is stale.
+        # Don't close the old connection eagerly — in-flight reads may still use it.
+        db_path = os.path.join(root, DB_RELATIVE_PATH)
+        if os.path.exists(db_path):
+            new_conn = sqlite3.connect(db_path, check_same_thread=False)
+            new_conn.row_factory = sqlite3.Row
+            new_conn.execute("PRAGMA journal_mode=WAL")
+            new_conn.execute("PRAGMA synchronous=NORMAL")
+            if ctx:
+                ctx.request_context.lifespan_state["db"] = new_conn
+            else:
+                new_conn.close()
+
+        if ctx:
+            await ctx.report_progress(3, 3)
+
+        return result.stdout.strip() or "Initialization complete."
+    except Exception as e:
+        return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    mcp.run()
