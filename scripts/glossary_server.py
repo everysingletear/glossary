@@ -139,6 +139,30 @@ def _get_lock(ctx: Context) -> asyncio.Lock:
     return _db_lock
 
 
+@asynccontextmanager
+async def _locked(ctx: Context, timeout: float = 30.0):
+    """Acquire the DB lock with a timeout.
+
+    If the lock cannot be acquired within `timeout` seconds (e.g. because a
+    previous request was interrupted mid-lock), discards the stuck lock,
+    replaces it with a fresh one, and raises RuntimeError.
+    """
+    global _db_lock
+    lock = _get_lock(ctx)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+    except asyncio.TimeoutError:
+        _db_lock = asyncio.Lock()
+        raise RuntimeError(
+            "DB lock timed out (a previous request was likely interrupted). "
+            "Please retry."
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 # ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
@@ -197,7 +221,6 @@ async def glossary_search(
     try:
         conn = _get_db(ctx)
         sql_pattern = escape_like(pattern).replace("*", "%")
-        lock = _get_lock(ctx)
 
         def _query() -> tuple[list[sqlite3.Row], int]:
             total = conn.execute(
@@ -213,7 +236,7 @@ async def glossary_search(
             ).fetchall()
             return rows, total
 
-        async with lock:
+        async with _locked(ctx):
             rows, total = await asyncio.to_thread(_query)
 
         if not rows:
@@ -262,7 +285,6 @@ async def glossary_file(
     try:
         conn = _get_db(ctx)
         normalized = file_path.replace("\\", "/")
-        lock = _get_lock(ctx)
 
         def _query() -> list[sqlite3.Row]:
             escaped = escape_like(normalized)
@@ -271,7 +293,7 @@ async def glossary_file(
                 (normalized, f"%/{escaped}"),
             ).fetchall()
 
-        async with lock:
+        async with _locked(ctx):
             rows = await asyncio.to_thread(_query)
 
         if not rows:
@@ -320,7 +342,6 @@ async def glossary_type(
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
 
         def _query() -> tuple[list[sqlite3.Row], int]:
             total = conn.execute(
@@ -336,7 +357,7 @@ async def glossary_type(
             ).fetchall()
             return rows, total
 
-        async with lock:
+        async with _locked(ctx):
             rows, total = await asyncio.to_thread(_query)
 
         if not rows:
@@ -397,7 +418,6 @@ async def glossary_duplicates(
     try:
         conn = _get_db(ctx)
         where = _DUP_WHERE[(include_tests, include_migrations)]
-        lock = _get_lock(ctx)
 
         def _query():
             total = conn.execute(
@@ -430,7 +450,7 @@ async def glossary_duplicates(
 
             return agg_rows, details, total
 
-        async with lock:
+        async with _locked(ctx):
             agg_rows, details, total = await asyncio.to_thread(_query)
 
         if not agg_rows:
@@ -481,7 +501,6 @@ async def glossary_stats(ctx: Context = None) -> str:
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
 
         def _query():
             file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
@@ -509,7 +528,7 @@ async def glossary_stats(ctx: Context = None) -> str:
             return (file_count, sym_count, described, test_files,
                     migration_files, last_scan, type_counts, lang_counts)
 
-        async with lock:
+        async with _locked(ctx):
             (file_count, sym_count, described, test_files,
              migration_files, last_scan, type_counts, lang_counts) = await asyncio.to_thread(_query)
 
@@ -566,7 +585,6 @@ async def glossary_recent(
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
 
         def _query() -> list[sqlite3.Row]:
             recent_files = conn.execute(
@@ -585,7 +603,7 @@ async def glossary_recent(
                 fps,
             ).fetchall()
 
-        async with lock:
+        async with _locked(ctx):
             rows = await asyncio.to_thread(_query)
 
         if not rows:
@@ -639,7 +657,6 @@ async def glossary_full(
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
 
         def _query() -> tuple[list[sqlite3.Row], int]:
             total = conn.execute(
@@ -651,7 +668,7 @@ async def glossary_full(
             ).fetchall()
             return rows, total
 
-        async with lock:
+        async with _locked(ctx):
             rows, total = await asyncio.to_thread(_query)
 
         if not rows:
@@ -722,7 +739,6 @@ async def glossary_describe(
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
         file_part, symbol_name = split_target(target)
 
         def _update() -> tuple[int, list[str]]:
@@ -749,7 +765,7 @@ async def glossary_describe(
                 conn.commit()
                 return updated, []
 
-        async with lock:
+        async with _locked(ctx):
             updated, paths = await asyncio.to_thread(_update)
 
         if updated:
@@ -789,15 +805,13 @@ async def glossary_init(ctx: Context = None) -> str:
         if ctx:
             await ctx.report_progress(0, 3)
 
-        lock = _get_lock(ctx)
-
         def _run_scanner():
             return subprocess.run(
                 [sys.executable, scanner, "--project-root", root, "--init"],
                 capture_output=True, text=True,
             )
 
-        async with lock:
+        async with _locked(ctx):
             result = await asyncio.to_thread(_run_scanner)
 
         if result.returncode != 0:
@@ -813,7 +827,7 @@ async def glossary_init(ctx: Context = None) -> str:
             new_conn.row_factory = sqlite3.Row
             new_conn.execute("PRAGMA journal_mode=WAL")
             new_conn.execute("PRAGMA synchronous=NORMAL")
-            async with lock:
+            async with _locked(ctx):
                 global _db_conn
                 old_conn = _db_conn
                 _db_conn = new_conn
@@ -865,7 +879,6 @@ async def glossary_enrich(
     """
     try:
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
         root = find_project_root()
 
         def _query() -> list[sqlite3.Row]:
@@ -893,7 +906,7 @@ async def glossary_enrich(
                 params,
             ).fetchall()
 
-        async with lock:
+        async with _locked(ctx):
             rows = await asyncio.to_thread(_query)
 
         if not rows:
@@ -965,7 +978,6 @@ async def glossary_describe_batch(
             return "Error: expected a JSON array of {target, description} objects."
 
         conn = _get_db(ctx)
-        lock = _get_lock(ctx)
 
         def _batch_update() -> tuple[int, int]:
             updated = 0
@@ -1000,7 +1012,7 @@ async def glossary_describe_batch(
             conn.commit()
             return updated, skipped
 
-        async with lock:
+        async with _locked(ctx):
             updated, skipped = await asyncio.to_thread(_batch_update)
 
         result = f"Updated {updated} symbol(s)."
