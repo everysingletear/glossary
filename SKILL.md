@@ -64,8 +64,8 @@ Show all symbols in a specific file. Accepts partial paths (`auth.py` matches `b
 Show all symbols of a given type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`.
 **When to use:** When you want a cross-project inventory of a specific symbol kind — all classes before designing inheritance, all constants before adding a new one. Supports `limit`/`offset` pagination for large codebases.
 
-### `glossary_duplicates(include_tests?, include_migrations?, verbose?)`
-Find symbols with the same name across different files. Tests and migrations excluded by default.
+### `glossary_duplicates(include_tests?, include_migrations?, verbose?, limit?, offset?)`
+Find symbols with the same name across different files. Tests and migrations excluded by default. Supports `limit`/`offset` pagination for projects with many duplicates.
 **When to use:** The #1 source of confusion during context compaction. If `process_data` exists in two modules, after compaction you might call the wrong one.
 
 ### `glossary_stats()`
