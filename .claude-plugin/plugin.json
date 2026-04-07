@@ -1,0 +1,7 @@
+{
+  "name": "glossary",
+  "description": "Persistent symbol registry for codebases. Indexes all functions, classes, and variables into SQLite, updated automatically via hooks. Query via MCP tools — zero token cost for updates, ~50 tokens per lookup.",
+  "author": {
+    "name": "sku77"
+  }
+}
