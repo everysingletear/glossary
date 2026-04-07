@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "glossary_mcp": {
+      "type": "stdio",
       "command": "python",
       "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/glossary_server.py"]
     }

@@ -1,7 +1,22 @@
 {
   "name": "glossary",
-  "description": "Persistent symbol registry for codebases. Indexes all functions, classes, and variables into SQLite, updated automatically via hooks. Query via MCP tools — zero token cost for updates, ~50 tokens per lookup.",
+  "version": "1.0.0",
+  "description": "Persistent symbol registry for codebases. Indexes all functions, classes, and variables into SQLite, updated automatically via hooks. Query via MCP tools or CLI. Zero token cost for updates, ~50 tokens per lookup.",
   "author": {
-    "name": "sku77"
-  }
+    "name": "everysingletear",
+    "url": "https://github.com/everysingletear"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/everysingletear/glossary",
+  "repository": "https://github.com/everysingletear/glossary",
+  "keywords": [
+    "glossary",
+    "symbols",
+    "index",
+    "token-efficient",
+    "mcp",
+    "sqlite",
+    "code-navigation",
+    "context-recovery"
+  ]
 }

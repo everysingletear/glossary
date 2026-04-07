@@ -1,0 +1,17 @@
+{
+  "name": "everysingletear",
+  "owner": {
+    "name": "everysingletear"
+  },
+  "metadata": {
+    "description": "Glossary — persistent symbol registry for Claude Code",
+    "homepage": "https://github.com/everysingletear/glossary"
+  },
+  "plugins": [
+    {
+      "name": "glossary",
+      "source": "./",
+      "description": "Persistent symbol registry. Indexes all declared symbols into SQLite, queries via MCP tools. 40x cheaper than reading source."
+    }
+  ]
+}
