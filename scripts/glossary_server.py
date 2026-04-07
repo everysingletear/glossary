@@ -71,9 +71,19 @@ def _handle_error(e: Exception) -> str:
 # Lifespan: open DB connection once, reuse across tool calls
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Module-level state (replaces lifespan_context — avoids MCP runtime API churn)
+# ---------------------------------------------------------------------------
+
+_db_conn: sqlite3.Connection | None = None
+_db_lock: asyncio.Lock | None = None
+
+
 @asynccontextmanager
 async def glossary_lifespan(server: FastMCP):
     """Initialize DB connection on startup; auto-init if DB doesn't exist."""
+    global _db_conn, _db_lock
+
     db_path = _get_db_path()
 
     if not os.path.exists(db_path):
@@ -86,35 +96,27 @@ async def glossary_lifespan(server: FastMCP):
                 capture_output=True, text=True,
             )
 
-    conn = None
     if os.path.exists(db_path):
-        # check_same_thread=False is safe here because the asyncio.Lock below
-        # serializes ALL database access — only one thread touches the connection
-        # at a time, even when dispatched via asyncio.to_thread.
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        # check_same_thread=False is safe: _db_lock serializes all access.
+        _db_conn = sqlite3.connect(db_path, check_same_thread=False)
+        _db_conn.row_factory = sqlite3.Row
+        _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA synchronous=NORMAL")
 
-    # Single lock serializes ALL database access through asyncio.to_thread,
-    # preventing concurrent threads from sharing the same sqlite3 connection.
-    db_lock = asyncio.Lock()
-
-    state = {"db": conn, "project_root": find_project_root(), "db_lock": db_lock}
+    _db_lock = asyncio.Lock()
 
     try:
-        yield state
+        yield {}
     finally:
-        # Close whatever connection is in state — may have been replaced by glossary_init.
-        final_conn = state.get("db")
-        if final_conn:
-            final_conn.close()
+        if _db_conn:
+            _db_conn.close()
+            _db_conn = None
 
 
 def _get_db(ctx: Context) -> sqlite3.Connection:
-    """Get DB connection from lifespan state, reconnect if needed."""
-    conn = ctx.request_context.lifespan_context.get("db")
-    if conn is None:
+    """Return the module-level DB connection, opening it lazily if needed."""
+    global _db_conn
+    if _db_conn is None:
         db_path = _get_db_path()
         if not os.path.exists(db_path):
             raise FileNotFoundError(
@@ -122,20 +124,19 @@ def _get_db(ctx: Context) -> sqlite3.Connection:
                 "Use the glossary_init tool to create it, "
                 "or check that you're running from inside a project directory."
             )
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        ctx.request_context.lifespan_context["db"] = conn
-    return conn
+        _db_conn = sqlite3.connect(db_path, check_same_thread=False)
+        _db_conn.row_factory = sqlite3.Row
+        _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA synchronous=NORMAL")
+    return _db_conn
 
 
 def _get_lock(ctx: Context) -> asyncio.Lock:
-    """Return the database lock from lifespan state."""
-    lock = ctx.request_context.lifespan_context.get("db_lock")
-    if lock is None:
-        raise RuntimeError("DB lock not initialized — server lifespan may have failed")
-    return lock
+    """Return the module-level DB lock, creating it lazily if needed."""
+    global _db_lock
+    if _db_lock is None:
+        _db_lock = asyncio.Lock()
+    return _db_lock
 
 
 # ---------------------------------------------------------------------------
@@ -812,14 +813,12 @@ async def glossary_init(ctx: Context = None) -> str:
             new_conn.row_factory = sqlite3.Row
             new_conn.execute("PRAGMA journal_mode=WAL")
             new_conn.execute("PRAGMA synchronous=NORMAL")
-            if ctx:
-                async with lock:
-                    old_conn = ctx.request_context.lifespan_context.get("db")
-                    ctx.request_context.lifespan_context["db"] = new_conn
-                    if old_conn:
-                        old_conn.close()
-            else:
-                new_conn.close()
+            async with lock:
+                global _db_conn
+                old_conn = _db_conn
+                _db_conn = new_conn
+                if old_conn:
+                    old_conn.close()
 
         if ctx:
             await ctx.report_progress(3, 3)
