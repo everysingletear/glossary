@@ -1,6 +1,6 @@
 ---
 name: glossary
-description: Generate and query a persistent glossary of all declared symbols in the codebase. Use proactively before naming new symbols, after context compaction, at session start, or when the user asks about existing functions, classes, variables, or naming collisions. Trigger phrases include "glossary", "update glossary", "what functions exist", "check for duplicates", "find where X is defined", "создай глоссарий", "обнови глоссарий", "какие функции есть", "проверь дубликаты". Do NOT use when the user needs to understand HOW code works — the glossary only tracks WHAT exists.
+description: Generate and query a persistent glossary of all declared symbols in the codebase. Use proactively before naming new symbols, after context compaction, at session start, or when the user asks about existing functions, classes, variables, or naming collisions. Do NOT use when the user needs to understand HOW code works — the glossary only tracks WHAT exists.
 compatibility:
   - mcp: "glossary_mcp server must be configured (see references/setup.md)"
   - python: ">=3.10 (for ast.unparse, union type hints)"
