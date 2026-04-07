@@ -811,6 +811,7 @@ async def glossary_init(ctx: Context = None) -> str:
                 capture_output=True, text=True,
             )
 
+        # Scanner can take >30s on very large repos; increase timeout if needed.
         async with _locked(ctx):
             result = await asyncio.to_thread(_run_scanner)
 
