@@ -735,14 +735,14 @@ async def glossary_describe(
                 if not affected:
                     return 0, []
                 updated = conn.execute(
-                    "UPDATE symbols SET description = ? WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?",
+                    "UPDATE symbols SET description = ?, description_manual = 1 WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?",
                     (description, file_norm, f"%/{file_escaped}", symbol_name),
                 ).rowcount
                 conn.commit()
                 return updated, [r["file_path"] for r in affected]
             else:
                 updated = conn.execute(
-                    "UPDATE symbols SET description = ? WHERE symbol_name = ?",
+                    "UPDATE symbols SET description = ?, description_manual = 1 WHERE symbol_name = ?",
                     (description, symbol_name),
                 ).rowcount
                 conn.commit()
