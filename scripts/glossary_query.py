@@ -338,13 +338,13 @@ def cmd_describe(conn: sqlite3.Connection, target: str, description: str):
         file_path = file_part.replace("\\", "/")
         escaped = escape_like(file_path)
         updated = conn.execute(
-            """UPDATE symbols SET description = ?
+            """UPDATE symbols SET description = ?, description_manual = 1
                WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?""",
             (description, file_path, f"%/{escaped}", symbol_name)
         ).rowcount
     else:
         updated = conn.execute(
-            """UPDATE symbols SET description = ?
+            """UPDATE symbols SET description = ?, description_manual = 1
                WHERE symbol_name = ?""",
             (description, symbol_name)
         ).rowcount
