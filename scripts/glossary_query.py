@@ -85,6 +85,10 @@ def cmd_search(conn: sqlite3.Connection, pattern: str, verbose: bool,
     if limit is None:
         limit = 100
     sql_pattern = escape_like(pattern).replace("*", "%")
+    total = conn.execute(
+        "SELECT COUNT(*) FROM symbols WHERE symbol_name LIKE ? ESCAPE '\\'",
+        (sql_pattern,),
+    ).fetchone()[0]
     rows = conn.execute(
         """SELECT * FROM symbols
            WHERE symbol_name LIKE ? ESCAPE '\\'
@@ -97,7 +101,8 @@ def cmd_search(conn: sqlite3.Connection, pattern: str, verbose: bool,
         print(f"No symbols matching '{pattern}'")
         return
 
-    print(f"Found {len(rows)} symbols matching '{pattern}':\n")
+    suffix = f" (offset {offset})" if offset > 0 else ""
+    print(f"Found {len(rows)} of {total} symbols matching '{pattern}'{suffix}:\n")
     for fp, syms in sorted(group_by_file(rows).items()):
         print(format_file_group(fp, syms, verbose))
 
@@ -131,6 +136,10 @@ def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool,
     """Show all symbols of a given type."""
     if limit is None:
         limit = 200
+    total = conn.execute(
+        "SELECT COUNT(*) FROM symbols WHERE symbol_type = ?",
+        (sym_type,),
+    ).fetchone()[0]
     rows = conn.execute(
         """SELECT * FROM symbols
            WHERE symbol_type = ?
@@ -143,7 +152,8 @@ def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool,
         print(f"No symbols of type '{sym_type}'")
         return
 
-    print(f"All {sym_type} symbols ({len(rows)} total):\n")
+    suffix = f" (offset {offset})" if offset > 0 else ""
+    print(f"All {sym_type} symbols ({len(rows)} of {total}{suffix}):\n")
     for fp, syms in sorted(group_by_file(rows).items()):
         print(format_file_group(fp, syms, verbose))
 
@@ -153,38 +163,45 @@ def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool,
 
 
 def cmd_duplicates(conn: sqlite3.Connection, verbose: bool, exclude_tests: bool,
-                   exclude_migrations: bool):
+                   exclude_migrations: bool, limit: int = 50, offset: int = 0):
     """Find symbols with the same name in different files."""
     include_tests = not exclude_tests
     include_migrations = not exclude_migrations
     where = _DUP_WHERE[(include_tests, include_migrations)]
 
+    # NOTE: {where} is from _DUP_WHERE dict (static constants, not user input) — safe f-string
+    total = conn.execute(
+        f"""SELECT COUNT(*) FROM (
+            SELECT symbol_name, symbol_type
+            FROM symbols WHERE {where}
+            GROUP BY symbol_name, symbol_type
+            HAVING COUNT(DISTINCT file_path) > 1
+        )"""
+    ).fetchone()[0]
     rows = conn.execute(
         f"""SELECT symbol_name, symbol_type, COUNT(DISTINCT file_path) as file_count
            FROM symbols
            WHERE {where}
            GROUP BY symbol_name, symbol_type
            HAVING file_count > 1
-           ORDER BY file_count DESC, symbol_name"""
+           ORDER BY file_count DESC, symbol_name
+           LIMIT ? OFFSET ?""",
+        (limit, offset),
     ).fetchall()
-
-    if not rows:
-        filters = []
-        if exclude_tests:
-            filters.append("tests")
-        if exclude_migrations:
-            filters.append("migrations")
-        suffix = f" (excluding {', '.join(filters)})" if filters else ""
-        print(f"No duplicate symbol names found{suffix}.")
-        return
 
     filters = []
     if exclude_tests:
         filters.append("tests")
     if exclude_migrations:
         filters.append("migrations")
-    suffix = f" (excluding {', '.join(filters)})" if filters else ""
-    print(f"Found {len(rows)} symbols with duplicate names{suffix}:\n")
+    filter_suffix = f" (excluding {', '.join(filters)})" if filters else ""
+    offset_suffix = f" (offset {offset})" if offset > 0 else ""
+
+    if not rows:
+        print(f"No duplicate symbol names found{filter_suffix}.")
+        return
+
+    print(f"Found {len(rows)} of {total} duplicate symbol names{filter_suffix}{offset_suffix}:\n")
 
     for r in rows:
         print(f"### `{r['symbol_name']}` ({r['symbol_type']}) — in {r['file_count']} files")
@@ -199,6 +216,10 @@ def cmd_duplicates(conn: sqlite3.Connection, verbose: bool, exclude_tests: bool,
             line_info = f" (L{loc['line_number']})" if verbose and loc["line_number"] else ""
             print(f"  - {loc['file_path']}: `{sig}`{line_info}")
         print()
+
+    if len(rows) == limit and total > offset + limit:
+        print(f"(showing {limit} of {total} groups"
+              f" — use --offset {offset + limit} for next page)")
 
 
 def cmd_stats(conn: sqlite3.Connection):
@@ -277,6 +298,7 @@ def cmd_full(conn: sqlite3.Connection, verbose: bool,
     """Dump the full glossary."""
     if limit is None:
         limit = 5000
+    total = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
     rows = conn.execute(
         """SELECT * FROM symbols ORDER BY file_path, line_number
            LIMIT ? OFFSET ?""",
@@ -288,9 +310,9 @@ def cmd_full(conn: sqlite3.Connection, verbose: bool,
         return
 
     by_file = group_by_file(rows)
-    total = len(rows)
     file_count = len(by_file)
-    print(f"# Full Glossary ({total} symbols in {file_count} files)\n")
+    suffix = f" (offset {offset})" if offset > 0 else ""
+    print(f"# Full Glossary ({len(rows)} of {total} symbols in {file_count} files{suffix})\n")
 
     if not verbose and total > 200:
         print("(Compact mode: top-level symbols only; pass --verbose for methods)\n")
@@ -383,7 +405,9 @@ def main():
         elif args.duplicates:
             exclude_tests = args.exclude_tests and not args.include_tests
             exclude_migrations = args.exclude_migrations and not args.include_migrations
-            cmd_duplicates(conn, args.verbose, exclude_tests, exclude_migrations)
+            dup_limit = args.limit if args.limit is not None else 50
+            cmd_duplicates(conn, args.verbose, exclude_tests, exclude_migrations,
+                           dup_limit, args.offset)
         elif args.stats:
             cmd_stats(conn)
         elif args.recent:
