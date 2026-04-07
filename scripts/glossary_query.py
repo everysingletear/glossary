@@ -79,14 +79,18 @@ def connect(db_path: str) -> sqlite3.Connection:
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_search(conn: sqlite3.Connection, pattern: str, verbose: bool):
+def cmd_search(conn: sqlite3.Connection, pattern: str, verbose: bool,
+               limit: int = None, offset: int = 0):
     """Search symbols by name with wildcard support."""
+    if limit is None:
+        limit = 100
     sql_pattern = escape_like(pattern).replace("*", "%")
     rows = conn.execute(
         """SELECT * FROM symbols
            WHERE symbol_name LIKE ? ESCAPE '\\'
-           ORDER BY file_path, line_number""",
-        (sql_pattern,)
+           ORDER BY file_path, line_number
+           LIMIT ? OFFSET ?""",
+        (sql_pattern, limit, offset)
     ).fetchall()
 
     if not rows:
@@ -96,6 +100,10 @@ def cmd_search(conn: sqlite3.Connection, pattern: str, verbose: bool):
     print(f"Found {len(rows)} symbols matching '{pattern}':\n")
     for fp, syms in sorted(group_by_file(rows).items()):
         print(format_file_group(fp, syms, verbose))
+
+    if len(rows) == limit:
+        print(f"\n(showing {limit} results from offset {offset}"
+              f" — use --offset {offset + limit} for next page)")
 
 
 def cmd_file(conn: sqlite3.Connection, file_path: str, verbose: bool):
@@ -118,13 +126,17 @@ def cmd_file(conn: sqlite3.Connection, file_path: str, verbose: bool):
         print(format_file_group(fp, syms, verbose))
 
 
-def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool):
+def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool,
+             limit: int = None, offset: int = 0):
     """Show all symbols of a given type."""
+    if limit is None:
+        limit = 200
     rows = conn.execute(
         """SELECT * FROM symbols
            WHERE symbol_type = ?
-           ORDER BY file_path, line_number""",
-        (sym_type,)
+           ORDER BY file_path, line_number
+           LIMIT ? OFFSET ?""",
+        (sym_type, limit, offset)
     ).fetchall()
 
     if not rows:
@@ -134,6 +146,10 @@ def cmd_type(conn: sqlite3.Connection, sym_type: str, verbose: bool):
     print(f"All {sym_type} symbols ({len(rows)} total):\n")
     for fp, syms in sorted(group_by_file(rows).items()):
         print(format_file_group(fp, syms, verbose))
+
+    if len(rows) == limit:
+        print(f"\n(showing {limit} results from offset {offset}"
+              f" — use --offset {offset + limit} for next page)")
 
 
 def cmd_duplicates(conn: sqlite3.Connection, verbose: bool, exclude_tests: bool,
@@ -256,10 +272,15 @@ def cmd_recent(conn: sqlite3.Connection, verbose: bool, limit: int = 5):
         print(format_file_group(fp, syms, verbose))
 
 
-def cmd_full(conn: sqlite3.Connection, verbose: bool):
+def cmd_full(conn: sqlite3.Connection, verbose: bool,
+             limit: int = None, offset: int = 0):
     """Dump the full glossary."""
+    if limit is None:
+        limit = 5000
     rows = conn.execute(
-        """SELECT * FROM symbols ORDER BY file_path, line_number"""
+        """SELECT * FROM symbols ORDER BY file_path, line_number
+           LIMIT ? OFFSET ?""",
+        (limit, offset)
     ).fetchall()
 
     if not rows:
@@ -278,10 +299,13 @@ def cmd_full(conn: sqlite3.Connection, verbose: bool):
             top_level = [s for s in syms if not s["parent"]]
             parts = [f"{s['symbol_name']}({s['symbol_type']})" for s in top_level]
             print(f"**{fp}** — {', '.join(parts)}")
-        return
+    else:
+        for fp in sorted(by_file.keys()):
+            print(format_file_group(fp, by_file[fp], verbose=verbose))
 
-    for fp in sorted(by_file.keys()):
-        print(format_file_group(fp, by_file[fp], verbose=verbose))
+    if len(rows) == limit:
+        print(f"\n(showing {limit} results from offset {offset}"
+              f" — use --offset {offset + limit} for next page)")
 
 
 def cmd_describe(conn: sqlite3.Connection, target: str, description: str):
@@ -328,6 +352,10 @@ def main():
                         help="Exclude migration files from --duplicates (default: on)")
     parser.add_argument("--include-migrations", action="store_true",
                         help="Include migration files in --duplicates")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Maximum results (default: 100 for search/type, 5000 for full)")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="Skip N results for pagination")
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--search", "-s", help="Search symbols by name (* wildcards)")
@@ -347,11 +375,11 @@ def main():
 
     try:
         if args.search:
-            cmd_search(conn, args.search, args.verbose)
+            cmd_search(conn, args.search, args.verbose, args.limit, args.offset)
         elif args.file:
             cmd_file(conn, args.file, args.verbose)
         elif args.type:
-            cmd_type(conn, args.type, args.verbose)
+            cmd_type(conn, args.type, args.verbose, args.limit, args.offset)
         elif args.duplicates:
             exclude_tests = args.exclude_tests and not args.include_tests
             exclude_migrations = args.exclude_migrations and not args.include_migrations
@@ -361,7 +389,7 @@ def main():
         elif args.recent:
             cmd_recent(conn, args.verbose)
         elif args.full:
-            cmd_full(conn, args.verbose)
+            cmd_full(conn, args.verbose, args.limit, args.offset)
         elif args.describe:
             cmd_describe(conn, args.describe[0], args.describe[1])
     finally:
