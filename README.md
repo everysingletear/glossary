@@ -146,6 +146,14 @@ Set a 1-line description on a symbol. Format: `file_path:symbol_name` or just `s
 
 Initialize or rebuild the database. Run once per project, or after branch switches.
 
+### `glossary_enrich(file_path?, symbol_type?, limit?, context_lines?)`
+
+Returns undescribed symbols with source code context for LLM description generation. The scanner auto-extracts docstrings/JSDoc — this covers the rest. Call `glossary_describe_batch` with generated descriptions.
+
+### `glossary_describe_batch(descriptions)`
+
+Save multiple descriptions at once. Takes a JSON array: `[{"target": "file:symbol", "description": "..."}]`. Descriptions are marked as manual and survive rescans.
+
 ## CLI usage
 
 All operations are also available via command-line:
@@ -196,8 +204,7 @@ python scripts/glossary_scanner.py --file src/foo.py  # Scan one file
 - **Stale after file deletion.** The hook fires on Edit/Write, not deletion. Run `glossary_init` after deleting files.
 - **Stale after git operations.** Branch switches change files outside hooks. Run `glossary_init` after major git operations.
 - **No function bodies.** Only names, signatures, and types are indexed. Use source reading for implementation details.
-- **Large files (>500KB) skipped.** Generated code and bundles are excluded.
-- **No dynamic symbols.** `setattr`, `__all__` re-exports, decorator-generated attributes are not indexed.
+- **No dynamic symbols.** `setattr`, `__all__` re-exports, decorator-generated attributes are not indexed — static analysis cannot resolve runtime symbol creation.
 
 ## Requirements
 
