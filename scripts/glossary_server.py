@@ -88,6 +88,9 @@ async def glossary_lifespan(server: FastMCP):
 
     conn = None
     if os.path.exists(db_path):
+        # check_same_thread=False is safe here because the asyncio.Lock below
+        # serializes ALL database access — only one thread touches the connection
+        # at a time, even when dispatched via asyncio.to_thread.
         conn = sqlite3.connect(db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -129,7 +132,10 @@ def _get_db(ctx: Context) -> sqlite3.Connection:
 
 def _get_lock(ctx: Context) -> asyncio.Lock:
     """Return the database lock from lifespan state."""
-    return ctx.request_context.lifespan_state.get("db_lock") or asyncio.Lock()
+    lock = ctx.request_context.lifespan_state.get("db_lock")
+    if lock is None:
+        raise RuntimeError("DB lock not initialized — server lifespan may have failed")
+    return lock
 
 
 # ---------------------------------------------------------------------------
@@ -192,29 +198,34 @@ async def glossary_search(
         sql_pattern = escape_like(pattern).replace("*", "%")
         lock = _get_lock(ctx)
 
-        def _query() -> list[sqlite3.Row]:
-            return conn.execute(
+        def _query() -> tuple[list[sqlite3.Row], int]:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM symbols WHERE symbol_name LIKE ? ESCAPE '\\'",
+                (sql_pattern,),
+            ).fetchone()[0]
+            rows = conn.execute(
                 """SELECT * FROM symbols
                    WHERE symbol_name LIKE ? ESCAPE '\\'
                    ORDER BY file_path, line_number
                    LIMIT ? OFFSET ?""",
                 (sql_pattern, limit, offset),
             ).fetchall()
+            return rows, total
 
         async with lock:
-            rows = await asyncio.to_thread(_query)
+            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return f"No symbols matching '{pattern}'"
 
         out = StringIO()
         suffix = f" (offset {offset})" if offset > 0 else ""
-        out.write(f"Found {len(rows)} symbols matching '{pattern}'{suffix}:\n")
+        out.write(f"Found {len(rows)} of {total} symbols matching '{pattern}'{suffix}:\n")
         for fp, syms in sorted(group_by_file(rows).items()):
             out.write(format_file_group(fp, syms, verbose))
             out.write("\n")
-        if len(rows) == limit:
-            out.write(f"\n(Showing first {limit}; pass offset={offset + limit} for more)\n")
+        if len(rows) == limit and total > offset + limit:
+            out.write(f"\n(Showing {limit} of {total}; pass offset={offset + limit} for more)\n")
         return out.getvalue()
     except Exception as e:
         return _handle_error(e)
@@ -310,17 +321,22 @@ async def glossary_type(
         conn = _get_db(ctx)
         lock = _get_lock(ctx)
 
-        def _query() -> list[sqlite3.Row]:
-            return conn.execute(
+        def _query() -> tuple[list[sqlite3.Row], int]:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM symbols WHERE symbol_type = ?",
+                (symbol_type,),
+            ).fetchone()[0]
+            rows = conn.execute(
                 """SELECT * FROM symbols
                    WHERE symbol_type = ?
                    ORDER BY file_path, line_number
                    LIMIT ? OFFSET ?""",
                 (symbol_type, limit, offset),
             ).fetchall()
+            return rows, total
 
         async with lock:
-            rows = await asyncio.to_thread(_query)
+            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return (
@@ -330,12 +346,12 @@ async def glossary_type(
 
         out = StringIO()
         suffix = f" (offset {offset})" if offset > 0 else ""
-        out.write(f"All {symbol_type} symbols ({len(rows)} shown{suffix}):\n")
+        out.write(f"All {symbol_type} symbols ({len(rows)} of {total}{suffix}):\n")
         for fp, syms in sorted(group_by_file(rows).items()):
             out.write(format_file_group(fp, syms, verbose))
             out.write("\n")
-        if len(rows) == limit:
-            out.write(f"\n(Showing first {limit}; pass offset={offset + limit} for more)\n")
+        if len(rows) == limit and total > offset + limit:
+            out.write(f"\n(Showing {limit} of {total}; pass offset={offset + limit} for more)\n")
         return out.getvalue()
     except Exception as e:
         return _handle_error(e)
@@ -361,6 +377,14 @@ async def glossary_duplicates(
     verbose: Annotated[bool, Field(
         description="Include line numbers for each location.",
     )] = False,
+    limit: Annotated[int, Field(
+        ge=1, le=500,
+        description="Maximum number of duplicate groups to return.",
+    )] = 50,
+    offset: Annotated[int, Field(
+        ge=0,
+        description="Number of duplicate groups to skip (for pagination).",
+    )] = 0,
     ctx: Context = None,
 ) -> str:
     """Find symbols with the same name AND type in different files.
@@ -375,12 +399,21 @@ async def glossary_duplicates(
         lock = _get_lock(ctx)
 
         def _query():
+            total = conn.execute(
+                f"""SELECT COUNT(*) FROM (
+                       SELECT 1 FROM symbols WHERE {where}
+                       GROUP BY symbol_name, symbol_type
+                       HAVING COUNT(DISTINCT file_path) > 1
+                   )"""
+            ).fetchone()[0]
             agg_rows = conn.execute(
                 f"""SELECT symbol_name, symbol_type, COUNT(DISTINCT file_path) as file_count
                    FROM symbols WHERE {where}
                    GROUP BY symbol_name, symbol_type
                    HAVING file_count > 1
-                   ORDER BY file_count DESC, symbol_name"""
+                   ORDER BY file_count DESC, symbol_name
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
             ).fetchall()
 
             details = {}
@@ -394,10 +427,10 @@ async def glossary_duplicates(
                 ).fetchall()
                 details[(r["symbol_name"], r["symbol_type"])] = locations
 
-            return agg_rows, details
+            return agg_rows, details, total
 
         async with lock:
-            agg_rows, details = await asyncio.to_thread(_query)
+            agg_rows, details, total = await asyncio.to_thread(_query)
 
         if not agg_rows:
             return "No duplicate symbol names found."
@@ -408,8 +441,9 @@ async def glossary_duplicates(
             filters.append("tests")
         if not include_migrations:
             filters.append("migrations")
-        suffix = f" (excluding {', '.join(filters)})" if filters else ""
-        out.write(f"Found {len(agg_rows)} duplicate symbol names{suffix}:\n\n")
+        filter_suffix = f" (excluding {', '.join(filters)})" if filters else ""
+        offset_suffix = f", offset {offset}" if offset > 0 else ""
+        out.write(f"Found {len(agg_rows)} of {total} duplicate symbol names{filter_suffix}{offset_suffix}:\n\n")
 
         for r in agg_rows:
             out.write(f"### `{r['symbol_name']}` ({r['symbol_type']}) — in {r['file_count']} files\n")
@@ -418,6 +452,9 @@ async def glossary_duplicates(
                 line_info = f" (L{loc['line_number']})" if verbose and loc["line_number"] else ""
                 out.write(f"  - {loc['file_path']}: `{sig}`{line_info}\n")
             out.write("\n")
+
+        if len(agg_rows) == limit and total > offset + limit:
+            out.write(f"(Showing {limit} of {total} groups; pass offset={offset + limit} for more)\n")
 
         return out.getvalue()
     except Exception as e:
@@ -603,28 +640,31 @@ async def glossary_full(
         conn = _get_db(ctx)
         lock = _get_lock(ctx)
 
-        def _query() -> list[sqlite3.Row]:
-            return conn.execute(
+        def _query() -> tuple[list[sqlite3.Row], int]:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM symbols",
+            ).fetchone()[0]
+            rows = conn.execute(
                 "SELECT * FROM symbols ORDER BY file_path, line_number LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
+            return rows, total
 
         async with lock:
-            rows = await asyncio.to_thread(_query)
+            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return "Glossary is empty. Use glossary_init to populate."
 
         by_file = group_by_file(rows)
-        total = len(rows)
         file_count = len(by_file)
         sorted_files = sorted(by_file.keys())
 
         out = StringIO()
         suffix = f" (offset {offset})" if offset > 0 else ""
-        out.write(f"# Full Glossary ({total} symbols in {file_count} files{suffix})\n\n")
-        if total == limit:
-            out.write(f"(Showing first {limit}; pass offset={offset + limit} for more)\n\n")
+        out.write(f"# Full Glossary ({len(rows)} of {total} symbols in {file_count} files{suffix})\n\n")
+        if len(rows) == limit and total > offset + limit:
+            out.write(f"(Showing {limit} of {total}; pass offset={offset + limit} for more)\n\n")
 
         if not verbose and total > 200:
             out.write("(Compact mode: top-level symbols only; pass verbose=True for methods)\n\n")
@@ -766,7 +806,6 @@ async def glossary_init(ctx: Context = None) -> str:
             await ctx.report_progress(2, 3)
 
         # Reconnect: the scanner recreated the DB, so the old connection is stale.
-        # Don't close the old connection eagerly — in-flight reads may still use it.
         db_path = os.path.join(root, DB_RELATIVE_PATH)
         if os.path.exists(db_path):
             new_conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -774,7 +813,11 @@ async def glossary_init(ctx: Context = None) -> str:
             new_conn.execute("PRAGMA journal_mode=WAL")
             new_conn.execute("PRAGMA synchronous=NORMAL")
             if ctx:
-                ctx.request_context.lifespan_state["db"] = new_conn
+                async with lock:
+                    old_conn = ctx.request_context.lifespan_state.get("db")
+                    ctx.request_context.lifespan_state["db"] = new_conn
+                    if old_conn:
+                        old_conn.close()
             else:
                 new_conn.close()
 
