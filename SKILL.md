@@ -1,6 +1,6 @@
 ---
 name: glossary
-description: Generate and query a persistent glossary of all declared symbols (functions, classes, variables) in the codebase. The glossary lives in SQLite and is updated automatically via hooks. Query via MCP tools — zero Bash dependency. Use this skill whenever you need to check what symbols exist before naming new ones, after context compaction to restore knowledge of the codebase, at the start of a new session to orient yourself, or when the user says "glossary", "update glossary", "what functions exist", "show me all classes", "check for duplicates", "find where X is defined", or asks about the code structure. Also use proactively before creating any new function, class, or variable to avoid naming collisions. Even if you think you remember the codebase, query the glossary — your memory may be from a stale or compacted context.
+description: Generate and query a persistent glossary of all declared symbols in the codebase. Use proactively before naming new symbols, after context compaction, at session start, or when the user asks about existing functions, classes, variables, or naming collisions. Do NOT use when the user needs to understand HOW code works — the glossary only tracks WHAT exists.
 compatibility:
   - mcp: "glossary_mcp server must be configured (see references/setup.md)"
   - python: ">=3.10 (for ast.unparse, union type hints)"
@@ -42,6 +42,19 @@ All tools are available as native MCP calls via the `glossary_mcp` server. No `-
 ### `glossary_search(pattern, verbose?, limit?, offset?)`
 Search symbols by name. Supports `*` wildcards.
 **When to use:** Before creating any new function, class, or variable — check for naming conflicts first. A 50-token search prevents a costly rename later. Supports `limit`/`offset` pagination — if results hit the limit, pass `offset=limit` for the next page.
+
+**Example:**
+```
+> glossary_search("process_*")
+
+Found 3 of 3 symbols matching 'process_*':
+**backend/app/pipeline.py**
+  fn  process_batch(items: list[dict], batch_size: int = 100)
+  fn  process_single(item: dict) -> Result
+
+**backend/app/worker.py**
+  fn  process_queue(queue_name: str, max_retries: int = 3)
+```
 
 ### `glossary_file(file_path, verbose?)`
 Show all symbols in a specific file. Accepts partial paths (`auth.py` matches `backend/app/auth.py`).
@@ -88,6 +101,12 @@ Orient yourself. For small projects, `glossary_full`. For large ones, `glossary_
 
 ### Instead of reading source files
 When you only need to know **what exists** (not **how it works**), the glossary is 10-100x cheaper than reading source.
+
+## When NOT to use the glossary
+
+- **Understanding implementation logic** — the glossary shows WHAT exists, not HOW it works. Use source reading or Serena's `find_symbol` with `include_body=True` for implementation details.
+- **Exploring code structure/architecture** — for directory trees, module dependencies, or architectural overview, use Serena's `get_symbols_overview` or directory exploration tools.
+- **Finding specific code patterns** — for regex searches in source code, use `search_for_pattern` (Serena) or `Grep`. The glossary only indexes symbol names and signatures, not code bodies.
 
 ## Setup
 
