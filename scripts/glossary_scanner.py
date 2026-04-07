@@ -659,13 +659,13 @@ def _extract_gddoc(source: str, pos: int) -> str:
 
 # Regex patterns for GDScript 4 constructs
 _GD_CLASS_NAME  = re.compile(r"^class_name\s+(\w+)", re.MULTILINE)
-_GD_CLASS       = re.compile(r"^(\t*)class\s+(\w+)\s*(?:extends\s+\w+)?\s*:", re.MULTILINE)
+_GD_CLASS       = re.compile(r"^([ \t]*)class\s+(\w+)\s*(?:extends\s+\w+)?\s*:", re.MULTILINE)
 _GD_FUNC        = re.compile(
     r"^([ \t]*)(?:static\s+)?func\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*([\w\[\]|, ]+))?\s*:",
     re.MULTILINE,
 )
 _GD_VAR         = re.compile(
-    r"^([ \t]*)(?:@\w+\s+)*var\s+(\w+)(?:\s*:\s*([\w\[\]|, ]+))?(?:\s*=\s*([^\n#]+))?",
+    r"^([ \t]*)(?:@\w+(?:\([^)]*\))?\s+)*var\s+(\w+)(?:\s*:\s*([\w\[\]|, ]+))?(?:\s*=\s*([^\n#]+))?",
     re.MULTILINE,
 )
 _GD_CONST       = re.compile(
@@ -763,6 +763,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
             sig = f"{fm.group(2)}({params})"
             if ret:
                 sig += f" -> {ret}"
+            sig = " ".join(sig.split())
             if len(sig) > 80:
                 sig = sig[:77] + "..."
             symbols.append({
@@ -825,6 +826,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
         sig = f"{m.group(2)}({params})"
         if ret:
             sig += f" -> {ret}"
+        sig = " ".join(sig.split())
         if len(sig) > 80:
             sig = sig[:77] + "..."
         symbols.append({
