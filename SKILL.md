@@ -1,0 +1,117 @@
+---
+name: glossary
+description: Generate and query a persistent glossary of all declared symbols (functions, classes, variables) in the codebase. The glossary lives in SQLite and is updated automatically via hooks. Query via MCP tools — zero Bash dependency. Use this skill whenever you need to check what symbols exist before naming new ones, after context compaction to restore knowledge of the codebase, at the start of a new session to orient yourself, or when the user says "glossary", "update glossary", "what functions exist", "show me all classes", "check for duplicates", "find where X is defined", or asks about the code structure. Also use proactively before creating any new function, class, or variable to avoid naming collisions. Even if you think you remember the codebase, query the glossary — your memory may be from a stale or compacted context.
+compatibility:
+  - mcp: "glossary_mcp server must be configured (see references/setup.md)"
+  - python: ">=3.10 (for ast.unparse, union type hints)"
+  - packages: "mcp>=1.0.0 (see scripts/requirements.txt)"
+---
+
+# Glossary
+
+A persistent, token-efficient registry of every declared symbol in the codebase.
+
+## Why this exists
+
+Your context degrades during compaction and vanishes between sessions. Without a persistent record, you will:
+- Create functions or variables with names that already exist elsewhere
+- Refer to symbols by wrong or outdated names from compressed context
+- Waste thousands of tokens re-scanning files to figure out what exists
+
+The glossary solves this with a SQLite database that survives sessions. You query only what you need — a single search returns ~50 tokens instead of a full file scan at ~2000 tokens.
+
+## Architecture
+
+```
+Hook (PostToolUse: Edit/Write)          You (LLM)
+  │                                        │
+  │  glossary_scanner.py --stdin           │  MCP tools: glossary_search, etc.
+  │  deterministic parsing, 0 tokens       │  native tool calls, no Bash needed
+  │                                        │
+  └──────────► .claude/glossary.db ◄───────┘
+```
+
+Two components:
+- **Scanner** (hook) — runs after every code edit. Uses Python `ast`, regex for JS/TS, optional tree-sitter for other languages. Deterministic — zero LLM tokens, ~100ms per file.
+- **MCP Server** — exposes query operations as native MCP tools. You call them like any other tool — no Bash, no script paths, no permission issues.
+
+## MCP Tools
+
+All tools are available as native MCP calls via the `glossary_mcp` server. No `--db` flags, no file paths — just call the tool.
+
+### `glossary_search(pattern, verbose?, limit?, offset?)`
+Search symbols by name. Supports `*` wildcards.
+**When to use:** Before creating any new function, class, or variable — check for naming conflicts first. A 50-token search prevents a costly rename later. Supports `limit`/`offset` pagination — if results hit the limit, pass `offset=limit` for the next page.
+
+### `glossary_file(file_path, verbose?)`
+Show all symbols in a specific file. Accepts partial paths (`auth.py` matches `backend/app/auth.py`).
+**When to use:** When you're about to modify a file and want to know what's there without reading source. ~100 tokens vs ~2000 for a full file read.
+
+### `glossary_type(symbol_type, verbose?, limit?, offset?)`
+Show all symbols of a given type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`.
+**When to use:** When you want a cross-project inventory of a specific symbol kind — all classes before designing inheritance, all constants before adding a new one. Supports `limit`/`offset` pagination for large codebases.
+
+### `glossary_duplicates(include_tests?, include_migrations?, verbose?)`
+Find symbols with the same name across different files. Tests and migrations excluded by default.
+**When to use:** The #1 source of confusion during context compaction. If `process_data` exists in two modules, after compaction you might call the wrong one.
+
+### `glossary_stats()`
+Quick overview — file count, symbol count by type and language. Cheapest query possible.
+**When to use:** At session start or after context compaction to understand project scope before diving into specific files.
+
+### `glossary_recent(limit?, verbose?)`
+Show symbols from the most recently scanned files.
+**When to use:** After edits to verify the scanner is tracking changes.
+
+### `glossary_full(verbose?, limit?, offset?)`
+Full glossary dump. For large projects (200+ symbols), auto-switches to compact format: `name(type)` per file, showing only top-level symbols (methods under classes are hidden to save tokens). Pass `verbose=True` to force full signatures, line numbers, and all methods regardless of project size. Supports `limit`/`offset` pagination for very large projects (5000+ symbols).
+**When to use:** Session start for small-to-medium projects. For large projects, prefer `glossary_stats` first, then `glossary_file` for specific areas.
+
+### `glossary_describe(target, description)`
+Set a 1-line description on a symbol. Format: `file_path:symbol_name` or just `symbol_name`. Windows absolute paths work correctly (`C:\path\file.py:func_name`). Calling again replaces the previous description.
+**When to use:** Only for ambiguous names (`run`, `handle`, `process`). Don't describe obvious names.
+
+### `glossary_init()`
+Initialize or rebuild the database. Scans all source files, creates `.claude/glossary.db`, adds to `.gitignore`.
+**When to use:** Once per project, or after branch switches / major refactors.
+
+## When to query
+
+### Before creating any new symbol
+Always search first to avoid collisions. This is the most important use case.
+
+### After context compaction
+When your context has been compressed, query the files you're working with to restore knowledge.
+
+### At session start
+Orient yourself. For small projects, `glossary_full`. For large ones, `glossary_stats` first, then `glossary_file` for specific areas.
+
+### Instead of reading source files
+When you only need to know **what exists** (not **how it works**), the glossary is 10-100x cheaper than reading source.
+
+## Setup
+
+See `references/setup.md` for MCP server configuration and hook setup.
+
+## Language support
+
+| Language | Parser | Coverage |
+|----------|--------|----------|
+| Python | `ast` module | Full — functions, classes, methods, variables, constants, type annotations |
+| JS/TS | Regex patterns | Good — top-level declarations, class methods, interfaces, types, enums |
+| Go, Rust | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-go tree-sitter-rust` |
+| Java, C/C++ | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-java tree-sitter-c tree-sitter-cpp` |
+
+## Limitations
+
+**Stale data after file deletion.** The hook fires on Edit/Write, not on file deletion. If a file is deleted outside of Claude Code (e.g., via shell), its symbols remain in the database until the next full scan. Run `glossary_init` after deleting files, or rely on `glossary_stats` staleness timestamp to detect drift.
+
+**Stale data after git operations.** Branch switches, merges, and rebases change files outside of Edit/Write hooks. Run `glossary_init` after any significant git operation that changes file structure.
+
+**Debounce window.** The scanner skips rescanning a file if it was scanned within the last 3 seconds. This means very rapid successive edits may leave the database briefly behind the latest file state.
+
+**Symbols inside functions.** Only module/class level declarations are indexed. Variables declared inside function bodies are not captured (too noisy, rarely needed for naming collision checks).
+
+**Large files (>500KB) are skipped.** Files over 500KB (generated code, schema dumps, bundled output) are silently excluded from scanning. This is intentional — such files are rarely relevant for naming collision checks and would slow down the scanner.
+
+**Dynamic symbols.** Dynamically generated symbols (e.g., `setattr`, `__all__` re-exports, decorator-generated attributes) are not indexed — the scanner only tracks statically declared names.
