@@ -1,10 +1,6 @@
 ---
 name: glossary
-description: Generate and query a persistent glossary of all declared symbols in the codebase. Use proactively before naming new symbols, after context compaction, at session start, or when the user asks about existing functions, classes, variables, or naming collisions. Do NOT use when the user needs to understand HOW code works — the glossary only tracks WHAT exists.
-compatibility:
-  - mcp: "glossary_mcp server must be configured (see references/setup.md)"
-  - python: ">=3.10 (for ast.unparse, union type hints)"
-  - packages: "mcp>=1.0.0 (see scripts/requirements.txt)"
+description: Generate and query a persistent glossary of all declared symbols in the codebase. Make sure to use this skill whenever you need to check what functions, classes, or variables exist — before creating new symbols, after context compaction, at session start, when resuming work, or whenever the user asks about existing code. Use it instead of reading source files when you only need to know WHAT exists (not HOW it works). A single glossary search costs ~50 tokens vs ~2000 for reading a file. Always prefer glossary_search over Grep or file reads for symbol name lookups.
 ---
 
 # Glossary
@@ -110,7 +106,7 @@ When you only need to know **what exists** (not **how it works**), the glossary 
 
 ## Setup
 
-See `references/setup.md` for MCP server configuration and hook setup.
+The plugin auto-configures the MCP server. For manual setup, see the README.
 
 ## Language support
 
