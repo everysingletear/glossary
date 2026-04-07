@@ -113,7 +113,7 @@ async def glossary_lifespan(server: FastMCP):
 
 def _get_db(ctx: Context) -> sqlite3.Connection:
     """Get DB connection from lifespan state, reconnect if needed."""
-    conn = ctx.request_context.lifespan_state.get("db")
+    conn = ctx.request_context.lifespan_context.get("db")
     if conn is None:
         db_path = _get_db_path()
         if not os.path.exists(db_path):
@@ -126,13 +126,13 @@ def _get_db(ctx: Context) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        ctx.request_context.lifespan_state["db"] = conn
+        ctx.request_context.lifespan_context["db"] = conn
     return conn
 
 
 def _get_lock(ctx: Context) -> asyncio.Lock:
     """Return the database lock from lifespan state."""
-    lock = ctx.request_context.lifespan_state.get("db_lock")
+    lock = ctx.request_context.lifespan_context.get("db_lock")
     if lock is None:
         raise RuntimeError("DB lock not initialized — server lifespan may have failed")
     return lock
@@ -814,8 +814,8 @@ async def glossary_init(ctx: Context = None) -> str:
             new_conn.execute("PRAGMA synchronous=NORMAL")
             if ctx:
                 async with lock:
-                    old_conn = ctx.request_context.lifespan_state.get("db")
-                    ctx.request_context.lifespan_state["db"] = new_conn
+                    old_conn = ctx.request_context.lifespan_context.get("db")
+                    ctx.request_context.lifespan_context["db"] = new_conn
                     if old_conn:
                         old_conn.close()
             else:
