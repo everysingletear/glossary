@@ -131,11 +131,18 @@ The plugin auto-configures the MCP server. For manual setup, see the README.
 
 | Language | Parser | Coverage |
 |----------|--------|----------|
-| Python | `ast` module | Full — functions, classes, methods, variables, constants, properties, type annotations |
-| JS/TS | Regex patterns | Good — top-level declarations, class methods, interfaces, types, enums |
-| GDScript (.gd) | Regex patterns | Good — functions, variables, constants, signals, enums, inner classes |
-| Go, Rust | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-go tree-sitter-rust` |
-| Java, C/C++ | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-java tree-sitter-c tree-sitter-cpp` |
+| Python | `ast` module | Full — functions, classes, methods, properties, variables, constants, type annotations |
+| JS/TS | tree-sitter | Full — functions, classes, methods, variables, constants, interfaces, types, enums |
+| GDScript (.gd) | Regex | Good — functions, variables, constants, signals, enums, inner classes |
+| Go | tree-sitter | Functions, methods, types (struct/interface) |
+| Rust | tree-sitter | Functions, structs, enums, traits, impl blocks, constants |
+| Java | tree-sitter | Classes, interfaces, enums, methods, fields, constructors |
+| C / C++ | tree-sitter | Functions, structs, enums, typedefs, variables |
+| C# | tree-sitter | Classes, structs, interfaces, enums, methods, properties, fields |
+| PHP | tree-sitter | Classes, interfaces, traits, functions, methods, constants, properties |
+| Swift | tree-sitter | Classes, structs, enums, protocols, functions, properties |
+| Kotlin | tree-sitter | Classes, objects, interfaces, functions, properties, enums |
+| Ruby | tree-sitter | Classes, modules, methods, constants |
 
 ## Limitations
 
