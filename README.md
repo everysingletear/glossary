@@ -122,7 +122,7 @@ Show all symbols in a file. Accepts partial paths (`auth.py` matches `backend/ap
 
 ### `glossary_type(symbol_type, verbose?, limit?, offset?)`
 
-Show all symbols of a type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`.
+Show all symbols of a type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`, `signal`, `property`, `staticmethod`, `classmethod`.
 
 ### `glossary_duplicates(include_tests?, include_migrations?, verbose?, limit?, offset?)`
 
@@ -183,8 +183,9 @@ python scripts/glossary_scanner.py --file src/foo.py  # Scan one file
 
 | Language | Parser | Coverage |
 |----------|--------|----------|
-| Python | `ast` module | Full — functions, classes, methods, variables, constants, type annotations |
+| Python | `ast` module | Full — functions, classes, methods, variables, constants, properties, type annotations |
 | JavaScript / TypeScript | Regex patterns | Good — top-level declarations, class methods, interfaces, types, enums |
+| GDScript (.gd) | Regex patterns | Good — functions, variables, constants, signals, enums, inner classes |
 | Go | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-go` |
 | Rust | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-rust` |
 | Java | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-java` |

@@ -57,7 +57,7 @@ Show all symbols in a specific file. Accepts partial paths (`auth.py` matches `b
 **When to use:** When you're about to modify a file and want to know what's there without reading source. ~100 tokens vs ~2000 for a full file read.
 
 ### `glossary_type(symbol_type, verbose?, limit?, offset?)`
-Show all symbols of a given type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`.
+Show all symbols of a given type: `fn`, `class`, `method`, `var`, `const`, `interface`, `type`, `enum`, `signal`, `property`, `staticmethod`, `classmethod`.
 **When to use:** When you want a cross-project inventory of a specific symbol kind — all classes before designing inheritance, all constants before adding a new one. Supports `limit`/`offset` pagination for large codebases.
 
 ### `glossary_duplicates(include_tests?, include_migrations?, verbose?, limit?, offset?)`
@@ -131,8 +131,9 @@ The plugin auto-configures the MCP server. For manual setup, see the README.
 
 | Language | Parser | Coverage |
 |----------|--------|----------|
-| Python | `ast` module | Full — functions, classes, methods, variables, constants, type annotations |
+| Python | `ast` module | Full — functions, classes, methods, variables, constants, properties, type annotations |
 | JS/TS | Regex patterns | Good — top-level declarations, class methods, interfaces, types, enums |
+| GDScript (.gd) | Regex patterns | Good — functions, variables, constants, signals, enums, inner classes |
 | Go, Rust | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-go tree-sitter-rust` |
 | Java, C/C++ | tree-sitter (optional) | Full if `pip install tree-sitter tree-sitter-java tree-sitter-c tree-sitter-cpp` |
 
