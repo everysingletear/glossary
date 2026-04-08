@@ -28,7 +28,7 @@ Hook (PostToolUse: Edit/Write)          You (LLM)
 ```
 
 Two components:
-- **Scanner** (hook) — runs after every code edit. Uses Python `ast`, regex for JS/TS, optional tree-sitter for other languages. Deterministic — zero LLM tokens, ~100ms per file.
+- **Scanner** (hook) — runs after every code edit. Uses Python `ast`, tree-sitter for JS/TS and 9 other languages, regex for GDScript. Supports 12 languages out of the box. Deterministic — zero LLM tokens, ~100ms per file.
 - **MCP Server** — exposes query operations as native MCP tools. You call them like any other tool — no Bash, no script paths, no permission issues.
 
 ## MCP Tools

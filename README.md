@@ -42,7 +42,7 @@ git clone https://github.com/everysingletear/glossary.git
 
 2. Install dependencies:
 ```bash
-pip install mcp pydantic
+pip install -r scripts/requirements.txt
 ```
 
 3. Add MCP server to your project's `.mcp.json`:
@@ -217,8 +217,11 @@ python scripts/glossary_scanner.py --file src/foo.py  # Scan one file
 ## Requirements
 
 - Python >= 3.10
-- `mcp` >= 1.0.0 (for MCP server)
-- `pydantic` (dependency of mcp)
+- `mcp` >= 1.0.0 (MCP server)
+- `pydantic` >= 2.0
+- `tree-sitter` >= 0.23 + grammar packages (13 languages built-in)
+
+All dependencies install automatically via `pip install -r scripts/requirements.txt` or when installing as a plugin.
 
 ## License
 
