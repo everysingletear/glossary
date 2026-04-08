@@ -58,7 +58,9 @@ def connect(db_path: str) -> sqlite3.Connection:
             print("Glossary database not found. Initializing full scan...", file=sys.stderr)
             result = subprocess.run(
                 [sys.executable, scanner_path, "--project-root", project_root, "--init"],
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=300,
             )
             if result.stdout:
                 print(result.stdout, file=sys.stderr)

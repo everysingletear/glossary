@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from glossary_common import DB_RELATIVE_PATH, PROJECT_MARKERS, find_project_root
+from glossary_common import DB_RELATIVE_PATH, PROJECT_MARKERS, find_project_root, get_db_path
 
 SKIP_DIRS = {
     "node_modules", "__pycache__", ".venv", "venv", ".env", "env",
@@ -92,9 +92,6 @@ DEBOUNCE_SECONDS = 3
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-
-def get_db_path(project_root: str) -> str:
-    return os.path.join(project_root, DB_RELATIVE_PATH)
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
@@ -728,7 +725,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
         if indent == 0:
             symbols.append({
                 "name": m.group(2),
-                "type": "class",
+                "type": "enum",
                 "signature": m.group(2),
                 "parent": None,
                 "line": line_of(m.start()),

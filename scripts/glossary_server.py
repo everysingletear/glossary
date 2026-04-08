@@ -6,17 +6,21 @@ LLM calls these tools directly, no Bash needed. The scanner hook
 keeps the database updated automatically; this server handles queries
 and descriptions.
 
+Architecture: stateless per-call DB connections. Each tool opens its own
+SQLite connection, runs its query, and closes it. No persistent state,
+no locks, no lifespan. This eliminates deadlocks on Windows and makes
+the server trivially restartable.
+
 Run:
     python glossary_server.py
     # or via Claude Code settings.json mcpServers config
 """
 
-import asyncio
 import os
 import sqlite3
 import subprocess
 import sys
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from io import StringIO
 from typing import Annotated, Literal
 
@@ -24,12 +28,12 @@ from mcp.server.fastmcp import FastMCP, Context
 from pydantic import Field
 
 from glossary_common import (
-    DB_RELATIVE_PATH,
     _DUP_WHERE,
     escape_like,
     find_project_root,
     format_file_group,
     format_symbol,
+    get_db_path,
     group_by_file,
     split_target,
 )
@@ -40,16 +44,12 @@ from glossary_common import (
 
 SCANNER_FILENAME = "glossary_scanner.py"
 
-SymbolType = Literal["fn", "class", "method", "var", "const", "interface", "type", "enum", "signal"]
+SymbolType = Literal["fn", "class", "method", "var", "const", "interface", "type", "enum", "signal", "property", "staticmethod", "classmethod"]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _get_db_path() -> str:
-    return os.path.join(find_project_root(), DB_RELATIVE_PATH)
-
 
 def _get_scanner_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), SCANNER_FILENAME)
@@ -67,104 +67,33 @@ def _handle_error(e: Exception) -> str:
     return f"Error: {type(e).__name__}: {e}"
 
 
-# ---------------------------------------------------------------------------
-# Lifespan: open DB connection once, reuse across tool calls
-# ---------------------------------------------------------------------------
+@contextmanager
+def _open_db():
+    """Open a fresh SQLite connection, yield it, close on exit.
 
-# ---------------------------------------------------------------------------
-# Module-level state (replaces lifespan_context — avoids MCP runtime API churn)
-# ---------------------------------------------------------------------------
-
-_db_conn: sqlite3.Connection | None = None
-_db_lock: asyncio.Lock | None = None
-
-
-@asynccontextmanager
-async def glossary_lifespan(server: FastMCP):
-    """Initialize DB connection on startup; auto-init if DB doesn't exist."""
-    global _db_conn, _db_lock
-
-    db_path = _get_db_path()
-
-    if not os.path.exists(db_path):
-        scanner = _get_scanner_path()
-        root = find_project_root()
-        if os.path.exists(scanner):
-            await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, scanner, "--project-root", root, "--init"],
-                capture_output=True, text=True,
-            )
-
-    if os.path.exists(db_path):
-        # check_same_thread=False is safe: _db_lock serializes all access.
-        _db_conn = sqlite3.connect(db_path, check_same_thread=False)
-        _db_conn.row_factory = sqlite3.Row
-        _db_conn.execute("PRAGMA journal_mode=WAL")
-        _db_conn.execute("PRAGMA synchronous=NORMAL")
-
-    _db_lock = asyncio.Lock()
-
-    try:
-        yield {}
-    finally:
-        if _db_conn:
-            _db_conn.close()
-            _db_conn = None
-
-
-def _get_db(ctx: Context) -> sqlite3.Connection:
-    """Return the module-level DB connection, opening it lazily if needed."""
-    global _db_conn
-    if _db_conn is None:
-        db_path = _get_db_path()
-        if not os.path.exists(db_path):
-            raise FileNotFoundError(
-                f"Glossary database not found at {db_path}. "
-                "Use the glossary_init tool to create it, "
-                "or check that you're running from inside a project directory."
-            )
-        _db_conn = sqlite3.connect(db_path, check_same_thread=False)
-        _db_conn.row_factory = sqlite3.Row
-        _db_conn.execute("PRAGMA journal_mode=WAL")
-        _db_conn.execute("PRAGMA synchronous=NORMAL")
-    return _db_conn
-
-
-def _get_lock(ctx: Context) -> asyncio.Lock:
-    """Return the module-level DB lock, creating it lazily if needed."""
-    global _db_lock
-    if _db_lock is None:
-        _db_lock = asyncio.Lock()
-    return _db_lock
-
-
-@asynccontextmanager
-async def _locked(ctx: Context, timeout: float = 30.0):
-    """Acquire the DB lock with a timeout.
-
-    If the lock cannot be acquired within `timeout` seconds (e.g. because a
-    previous request was interrupted mid-lock), discards the stuck lock,
-    replaces it with a fresh one, and raises RuntimeError.
+    Each tool call gets its own connection — no shared state, no locks.
+    SQLite WAL mode allows concurrent readers; writers serialize at the
+    file level automatically.
     """
-    global _db_lock
-    lock = _get_lock(ctx)
-    try:
-        await asyncio.wait_for(lock.acquire(), timeout=timeout)
-    except asyncio.TimeoutError:
-        _db_lock = asyncio.Lock()
-        raise RuntimeError(
-            "DB lock timed out (a previous request was likely interrupted). "
-            "Please retry."
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(
+            f"Glossary database not found at {db_path}. "
+            "Use the glossary_init tool to create it, "
+            "or check that you're running from inside a project directory."
         )
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
-        yield
+        yield conn
     finally:
-        lock.release()
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
-# MCP Server
+# MCP Server — no lifespan, no persistent state
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP(
@@ -175,7 +104,6 @@ mcp = FastMCP(
         "Use glossary_stats or glossary_full at session start to orient yourself. "
         "Use glossary_file to see what's in a file without reading source code."
     ),
-    lifespan=glossary_lifespan,
 )
 
 
@@ -219,10 +147,8 @@ async def glossary_search(
     Returns matching symbols grouped by file with type and signature.
     """
     try:
-        conn = _get_db(ctx)
         sql_pattern = escape_like(pattern).replace("*", "%")
-
-        def _query() -> tuple[list[sqlite3.Row], int]:
+        with _open_db() as conn:
             total = conn.execute(
                 "SELECT COUNT(*) FROM symbols WHERE symbol_name LIKE ? ESCAPE '\\'",
                 (sql_pattern,),
@@ -234,10 +160,6 @@ async def glossary_search(
                    LIMIT ? OFFSET ?""",
                 (sql_pattern, limit, offset),
             ).fetchall()
-            return rows, total
-
-        async with _locked(ctx):
-            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return f"No symbols matching '{pattern}'"
@@ -283,18 +205,13 @@ async def glossary_file(
     before reading implementation details.
     """
     try:
-        conn = _get_db(ctx)
         normalized = file_path.replace("\\", "/")
-
-        def _query() -> list[sqlite3.Row]:
+        with _open_db() as conn:
             escaped = escape_like(normalized)
-            return conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM symbols WHERE file_path = ? OR file_path LIKE ? ESCAPE '\\' ORDER BY file_path, line_number",
                 (normalized, f"%/{escaped}"),
             ).fetchall()
-
-        async with _locked(ctx):
-            rows = await asyncio.to_thread(_query)
 
         if not rows:
             return f"No symbols found in '{file_path}'. Check the path or run glossary_init."
@@ -341,9 +258,7 @@ async def glossary_type(
     Valid types: fn, class, method, var, const, interface, type, enum.
     """
     try:
-        conn = _get_db(ctx)
-
-        def _query() -> tuple[list[sqlite3.Row], int]:
+        with _open_db() as conn:
             total = conn.execute(
                 "SELECT COUNT(*) FROM symbols WHERE symbol_type = ?",
                 (symbol_type,),
@@ -355,10 +270,6 @@ async def glossary_type(
                    LIMIT ? OFFSET ?""",
                 (symbol_type, limit, offset),
             ).fetchall()
-            return rows, total
-
-        async with _locked(ctx):
-            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return (
@@ -416,10 +327,8 @@ async def glossary_duplicates(
     or include_migrations to see those too.
     """
     try:
-        conn = _get_db(ctx)
         where = _DUP_WHERE[(include_tests, include_migrations)]
-
-        def _query():
+        with _open_db() as conn:
             total = conn.execute(
                 f"""SELECT COUNT(*) FROM (
                        SELECT 1 FROM symbols WHERE {where}
@@ -447,11 +356,6 @@ async def glossary_duplicates(
                     (r["symbol_name"], r["symbol_type"]),
                 ).fetchall()
                 details[(r["symbol_name"], r["symbol_type"])] = locations
-
-            return agg_rows, details, total
-
-        async with _locked(ctx):
-            agg_rows, details, total = await asyncio.to_thread(_query)
 
         if not agg_rows:
             return "No duplicate symbol names found."
@@ -500,9 +404,7 @@ async def glossary_stats(ctx: Context = None) -> str:
     Includes staleness indicator so you know when the database was last updated.
     """
     try:
-        conn = _get_db(ctx)
-
-        def _query():
+        with _open_db() as conn:
             file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             sym_count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             described = conn.execute(
@@ -525,12 +427,6 @@ async def glossary_stats(ctx: Context = None) -> str:
                 """SELECT language, COUNT(*) as cnt, SUM(symbol_count) as syms
                    FROM files GROUP BY language ORDER BY cnt DESC"""
             ).fetchall()
-            return (file_count, sym_count, described, test_files,
-                    migration_files, last_scan, type_counts, lang_counts)
-
-        async with _locked(ctx):
-            (file_count, sym_count, described, test_files,
-             migration_files, last_scan, type_counts, lang_counts) = await asyncio.to_thread(_query)
 
         out = StringIO()
         out.write(f"Glossary: {sym_count} symbols in {file_count} files\n")
@@ -584,30 +480,22 @@ async def glossary_recent(
     full context.
     """
     try:
-        conn = _get_db(ctx)
-
-        def _query() -> list[sqlite3.Row]:
+        with _open_db() as conn:
             recent_files = conn.execute(
                 "SELECT file_path FROM files ORDER BY last_scanned DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             if not recent_files:
-                return []
+                return "No recently scanned symbols."
             fps = [r["file_path"] for r in recent_files]
             placeholders = ",".join("?" * len(fps))
-            return conn.execute(
+            rows = conn.execute(
                 f"""SELECT s.*, f.last_scanned FROM symbols s
                    JOIN files f ON s.file_path = f.file_path
                    WHERE s.file_path IN ({placeholders})
                    ORDER BY f.last_scanned DESC, s.line_number""",
                 fps,
             ).fetchall()
-
-        async with _locked(ctx):
-            rows = await asyncio.to_thread(_query)
-
-        if not rows:
-            return "No recently scanned symbols."
 
         out = StringIO()
         by_file = group_by_file(rows)
@@ -656,9 +544,7 @@ async def glossary_full(
     Use limit/offset for pagination on very large projects (5000+ symbols).
     """
     try:
-        conn = _get_db(ctx)
-
-        def _query() -> tuple[list[sqlite3.Row], int]:
+        with _open_db() as conn:
             total = conn.execute(
                 "SELECT COUNT(*) FROM symbols",
             ).fetchone()[0]
@@ -666,10 +552,6 @@ async def glossary_full(
                 "SELECT * FROM symbols ORDER BY file_path, line_number LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-            return rows, total
-
-        async with _locked(ctx):
-            rows, total = await asyncio.to_thread(_query)
 
         if not rows:
             return "Glossary is empty. Use glossary_init to populate."
@@ -738,10 +620,8 @@ async def glossary_describe(
     Calling again with a different description replaces the previous one.
     """
     try:
-        conn = _get_db(ctx)
         file_part, symbol_name = split_target(target)
-
-        def _update() -> tuple[int, list[str]]:
+        with _open_db() as conn:
             if file_part is not None:
                 file_norm = file_part.replace("\\", "/")
                 file_escaped = escape_like(file_norm)
@@ -750,29 +630,23 @@ async def glossary_describe(
                     (file_norm, f"%/{file_escaped}", symbol_name),
                 ).fetchall()
                 if not affected:
-                    return 0, []
+                    return f"Symbol '{target}' not found. Check the name with glossary_search."
                 updated = conn.execute(
                     "UPDATE symbols SET description = ?, description_manual = 1 WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\') AND symbol_name = ?",
                     (description, file_norm, f"%/{file_escaped}", symbol_name),
                 ).rowcount
                 conn.commit()
-                return updated, [r["file_path"] for r in affected]
+                paths = [r["file_path"] for r in affected]
+                return f"Updated description for '{symbol_name}' in: {', '.join(paths)}"
             else:
                 updated = conn.execute(
                     "UPDATE symbols SET description = ?, description_manual = 1 WHERE symbol_name = ?",
                     (description, symbol_name),
                 ).rowcount
                 conn.commit()
-                return updated, []
-
-        async with _locked(ctx):
-            updated, paths = await asyncio.to_thread(_update)
-
-        if updated:
-            if paths:
-                return f"Updated description for '{symbol_name}' in: {', '.join(paths)}"
-            return f"Updated description for '{target}' ({updated} row(s))"
-        return f"Symbol '{target}' not found. Check the name with glossary_search."
+                if updated:
+                    return f"Updated description for '{target}' ({updated} row(s))"
+                return f"Symbol '{target}' not found. Check the name with glossary_search."
     except Exception as e:
         return _handle_error(e)
 
@@ -805,42 +679,24 @@ async def glossary_init(ctx: Context = None) -> str:
         if ctx:
             await ctx.report_progress(0, 3)
 
-        def _run_scanner():
-            return subprocess.run(
-                [sys.executable, scanner, "--project-root", root, "--init"],
-                capture_output=True, text=True,
-            )
-
-        # Note: the 30s timeout applies only to lock ACQUISITION, not to the
-        # scanner itself. The scanner may take several minutes on large repos;
-        # that is expected and does not cause a timeout error.
-        async with _locked(ctx):
-            result = await asyncio.to_thread(_run_scanner)
+        # No DB connection to close — stateless architecture.
+        # Scanner runs as subprocess with its own SQLite connection.
+        result = subprocess.run(
+            [sys.executable, scanner, "--project-root", root, "--init"],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=300,
+        )
 
         if result.returncode != 0:
             return f"Error: Scanner failed — {result.stderr.strip()}"
 
         if ctx:
-            await ctx.report_progress(2, 3)
-
-        # Reconnect: the scanner recreated the DB, so the old connection is stale.
-        db_path = os.path.join(root, DB_RELATIVE_PATH)
-        if os.path.exists(db_path):
-            new_conn = sqlite3.connect(db_path, check_same_thread=False)
-            new_conn.row_factory = sqlite3.Row
-            new_conn.execute("PRAGMA journal_mode=WAL")
-            new_conn.execute("PRAGMA synchronous=NORMAL")
-            async with _locked(ctx):
-                global _db_conn
-                old_conn = _db_conn
-                _db_conn = new_conn
-                if old_conn:
-                    old_conn.close()
-
-        if ctx:
             await ctx.report_progress(3, 3)
 
         return result.stdout.strip() or "Initialization complete."
+    except subprocess.TimeoutExpired:
+        return "Error: Scanner timed out after 5 minutes."
     except Exception as e:
         return _handle_error(e)
 
@@ -878,29 +734,28 @@ async def glossary_enrich(
     reads source lines around each symbol, and returns them formatted for the LLM
     to generate descriptions. After generating, save them with glossary_describe_batch.
 
-    Workflow: glossary_enrich → LLM generates descriptions → glossary_describe_batch.
+    Workflow: glossary_enrich -> LLM generates descriptions -> glossary_describe_batch.
     """
     try:
-        conn = _get_db(ctx)
         root = find_project_root()
+        conditions = ["description IS NULL"]
+        params: list = []
+        if file_path:
+            normalized = file_path.replace("\\", "/")
+            escaped = escape_like(normalized)
+            conditions.append(
+                "(file_path = ? OR file_path LIKE ? ESCAPE '\\')"
+            )
+            params.extend([normalized, f"%/{escaped}"])
+        if symbol_type:
+            conditions.append("symbol_type = ?")
+            params.append(symbol_type)
 
-        def _query() -> list[sqlite3.Row]:
-            conditions = ["description IS NULL"]
-            params: list = []
-            if file_path:
-                normalized = file_path.replace("\\", "/")
-                escaped = escape_like(normalized)
-                conditions.append(
-                    "(file_path = ? OR file_path LIKE ? ESCAPE '\\')"
-                )
-                params.extend([normalized, f"%/{escaped}"])
-            if symbol_type:
-                conditions.append("symbol_type = ?")
-                params.append(symbol_type)
+        where = " AND ".join(conditions)
+        params.append(limit)
 
-            where = " AND ".join(conditions)
-            params.append(limit)
-            return conn.execute(
+        with _open_db() as conn:
+            rows = conn.execute(
                 f"""SELECT file_path, symbol_name, symbol_type, signature,
                            parent, line_number
                     FROM symbols WHERE {where}
@@ -908,9 +763,6 @@ async def glossary_enrich(
                     LIMIT ?""",
                 params,
             ).fetchall()
-
-        async with _locked(ctx):
-            rows = await asyncio.to_thread(_query)
 
         if not rows:
             scope = f" in '{file_path}'" if file_path else ""
@@ -980,11 +832,9 @@ async def glossary_describe_batch(
         if not isinstance(items, list):
             return "Error: expected a JSON array of {target, description} objects."
 
-        conn = _get_db(ctx)
-
-        def _batch_update() -> tuple[int, int]:
-            updated = 0
-            skipped = 0
+        updated = 0
+        skipped = 0
+        with _open_db() as conn:
             for item in items:
                 target = item.get("target", "")
                 desc = item.get("description", "")
@@ -1013,10 +863,6 @@ async def glossary_describe_batch(
                 else:
                     skipped += 1
             conn.commit()
-            return updated, skipped
-
-        async with _locked(ctx):
-            updated, skipped = await asyncio.to_thread(_batch_update)
 
         result = f"Updated {updated} symbol(s)."
         if skipped:

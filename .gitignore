@@ -1,5 +1,5 @@
 # Glossary database (regenerable per-project)
-.claude/glossary.db
+.claude/glossary.db*
 
 # Python
 __pycache__/
