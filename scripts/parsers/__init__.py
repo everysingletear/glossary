@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from parsers import python as _python
+from parsers import gdscript as _gdscript
 
 # Explicit parser registration. Add new parsers here as they are created.
-_PARSERS: list = [_python]
+_PARSERS: list = [_python, _gdscript]
 
 # Build extension -> module mapping
 _EXT_MAP: dict[str, object] = {}
