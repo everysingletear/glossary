@@ -9,9 +9,15 @@ from parsers import go as _go
 from parsers import rust as _rust
 from parsers import java as _java
 from parsers import c as _c
+from parsers import csharp as _csharp
+from parsers import php as _php
+from parsers import swift as _swift
+from parsers import kotlin as _kotlin
+from parsers import ruby as _ruby
 
 # Explicit parser registration. Add new parsers here as they are created.
-_PARSERS: list = [_python, _gdscript, _javascript, _go, _rust, _java, _c]
+_PARSERS: list = [_python, _gdscript, _javascript, _go, _rust, _java, _c,
+                  _csharp, _php, _swift, _kotlin, _ruby]
 
 # Build extension -> module mapping
 _EXT_MAP: dict[str, object] = {}
