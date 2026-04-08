@@ -5,9 +5,13 @@ from __future__ import annotations
 from parsers import python as _python
 from parsers import gdscript as _gdscript
 from parsers import javascript as _javascript
+from parsers import go as _go
+from parsers import rust as _rust
+from parsers import java as _java
+from parsers import c as _c
 
 # Explicit parser registration. Add new parsers here as they are created.
-_PARSERS: list = [_python, _gdscript, _javascript]
+_PARSERS: list = [_python, _gdscript, _javascript, _go, _rust, _java, _c]
 
 # Build extension -> module mapping
 _EXT_MAP: dict[str, object] = {}
