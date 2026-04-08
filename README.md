@@ -90,7 +90,7 @@ Hook (PostToolUse: Edit/Write)          LLM
 ```
 
 Two components:
-- **Scanner** (hook) — runs after every code edit. Uses Python `ast`, regex for JS/TS, optional tree-sitter for other languages. Deterministic — zero LLM tokens, ~100ms per file.
+- **Scanner** (hook) — runs after every code edit. Uses Python `ast`, tree-sitter for JS/TS and 9 other languages, regex for GDScript. Deterministic — zero LLM tokens, ~100ms per file.
 - **MCP Server** — exposes query tools as native MCP calls. No Bash, no script paths, no permission prompts.
 
 ## MCP Tools
@@ -183,13 +183,18 @@ python scripts/glossary_scanner.py --file src/foo.py  # Scan one file
 
 | Language | Parser | Coverage |
 |----------|--------|----------|
-| Python | `ast` module | Full — functions, classes, methods, variables, constants, properties, type annotations |
-| JavaScript / TypeScript | Regex patterns | Good — top-level declarations, class methods, interfaces, types, enums |
-| GDScript (.gd) | Regex patterns | Good — functions, variables, constants, signals, enums, inner classes |
-| Go | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-go` |
-| Rust | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-rust` |
-| Java | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-java` |
-| C/C++ | tree-sitter (optional) | Full with `pip install tree-sitter tree-sitter-c tree-sitter-cpp` |
+| Python | `ast` module | Full — functions, classes, methods, properties, variables, constants, type annotations |
+| JavaScript / TypeScript | tree-sitter | Full — functions, classes, methods, variables, constants, interfaces, types, enums |
+| GDScript (.gd) | Regex | Good — functions, variables, constants, signals, enums, inner classes |
+| Go | tree-sitter | Functions, methods, types (struct/interface) |
+| Rust | tree-sitter | Functions, structs, enums, traits, impl blocks, constants |
+| Java | tree-sitter | Classes, interfaces, enums, methods, fields, constructors |
+| C / C++ | tree-sitter | Functions, structs, enums, typedefs, variables |
+| C# | tree-sitter | Classes, structs, interfaces, enums, methods, properties, fields |
+| PHP | tree-sitter | Classes, interfaces, traits, functions, methods, constants, properties |
+| Swift | tree-sitter | Classes, structs, enums, protocols, functions, properties |
+| Kotlin | tree-sitter | Classes, objects, interfaces, functions, properties, enums |
+| Ruby | tree-sitter | Classes, modules, methods, constants |
 
 ## When to use vs alternatives
 
