@@ -40,7 +40,7 @@ from glossary_common import (
 
 SCANNER_FILENAME = "glossary_scanner.py"
 
-SymbolType = Literal["fn", "class", "method", "var", "const", "interface", "type", "enum"]
+SymbolType = Literal["fn", "class", "method", "var", "const", "interface", "type", "enum", "signal"]
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +811,9 @@ async def glossary_init(ctx: Context = None) -> str:
                 capture_output=True, text=True,
             )
 
-        # Scanner can take >30s on very large repos; increase timeout if needed.
+        # Note: the 30s timeout applies only to lock ACQUISITION, not to the
+        # scanner itself. The scanner may take several minutes on large repos;
+        # that is expected and does not cause a timeout error.
         async with _locked(ctx):
             result = await asyncio.to_thread(_run_scanner)
 

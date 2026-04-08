@@ -791,6 +791,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
                 "signature": sig,
                 "parent": class_name,
                 "line": first_block_line + blk_line + 1,
+                "description": _extract_gddoc(block_source, vm.start()),
             })
 
         for cm in _GD_CONST.finditer(block_source):
@@ -803,6 +804,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
                 "signature": sig,
                 "parent": class_name,
                 "line": first_block_line + blk_line + 1,
+                "description": _extract_gddoc(block_source, cm.start()),
             })
 
         for sm in _GD_SIGNAL.finditer(block_source):
@@ -815,6 +817,7 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
                 "signature": sig,
                 "parent": class_name,
                 "line": first_block_line + blk_line + 1,
+                "description": _extract_gddoc(block_source, sm.start()),
             })
 
     # --- top-level symbols (indent == 0) ---
