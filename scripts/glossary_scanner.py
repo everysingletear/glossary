@@ -193,7 +193,7 @@ def upsert_file_symbols(conn: sqlite3.Connection, file_path: str,
                 desc = sym.get("description")
                 desc_manual = 0
             conn.execute(
-                """INSERT INTO symbols
+                """INSERT OR IGNORE INTO symbols
                    (file_path, symbol_name, symbol_type, signature, parent,
                     line_number, description, description_manual,
                     is_test, is_migration)
@@ -756,7 +756,13 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
         block_source = "\n".join(line for _, line in block)
         first_block_line = block[0][0]  # 0-based
 
+        # Only include symbols at the immediate class-member indent level.
+        # Symbols with deeper indent are local variables inside methods — skip them.
+        member_indent = _gd_indent(block[0][1])
+
         for fm in _GD_FUNC.finditer(block_source):
+            if len(fm.group(1)) != member_indent:
+                continue  # nested inside a method body
             blk_line = block_source[:fm.start()].count("\n")
             params = fm.group(3).strip()
             ret = (fm.group(4) or "").strip()
@@ -776,6 +782,8 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
             })
 
         for vm in _GD_VAR.finditer(block_source):
+            if len(vm.group(1)) != member_indent:
+                continue  # local variable inside a method body
             blk_line = block_source[:vm.start()].count("\n")
             name = vm.group(2)
             type_hint = (vm.group(3) or "").strip()
@@ -795,6 +803,8 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
             })
 
         for cm in _GD_CONST.finditer(block_source):
+            if len(cm.group(1)) != member_indent:
+                continue  # nested inside a method body
             blk_line = block_source[:cm.start()].count("\n")
             val = cm.group(4).strip()
             sig = f"{cm.group(2)} = {val[:30]}"
@@ -808,6 +818,8 @@ def parse_gdscript(source: str, file_path: str) -> list[dict]:
             })
 
         for sm in _GD_SIGNAL.finditer(block_source):
+            if len(sm.group(1)) != member_indent:
+                continue  # nested inside a method body
             blk_line = block_source[:sm.start()].count("\n")
             args = (sm.group(3) or "").strip()
             sig = f"{sm.group(2)}{args}" if args else sm.group(2)
