@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from parsers import python as _python
+
 # Explicit parser registration. Add new parsers here as they are created.
-_PARSERS: list = []
+_PARSERS: list = [_python]
 
 # Build extension -> module mapping
 _EXT_MAP: dict[str, object] = {}

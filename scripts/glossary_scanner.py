@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from glossary_common import DB_RELATIVE_PATH, PROJECT_MARKERS, find_project_root, get_db_path
+from parsers import parse as registry_parse, SUPPORTED_EXTENSIONS
 
 SKIP_DIRS = {
     "node_modules", "__pycache__", ".venv", "venv", ".env", "env",
@@ -1117,11 +1118,14 @@ def parse_file(file_path: str, project_root: str) -> tuple[list[dict], str] | No
     except (OSError, IOError):
         return None
 
-    lang = LANGUAGE_MAP.get(ext)
+    # Try registry first (migrated parsers)
+    result = registry_parse(source, file_path, ext)
+    if result is not None:
+        return result
 
-    if ext == ".py":
-        return parse_python(source, file_path), "python"
-    elif ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
+    # Fallback: old inline code for not-yet-migrated languages
+    lang = LANGUAGE_MAP.get(ext)
+    if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
         return parse_javascript(source, file_path), lang or "javascript"
     elif ext == ".gd":
         return parse_gdscript(source, file_path), "gdscript"
@@ -1142,7 +1146,7 @@ def parse_file(file_path: str, project_root: str) -> tuple[list[dict], str] | No
 def discover_files(project_root: str) -> list[str]:
     """Walk the project and find all parseable source files."""
     files = []
-    supported_exts = set(LANGUAGE_MAP.keys()) | set(_TS_EXT_MAP.keys())
+    supported_exts = SUPPORTED_EXTENSIONS | set(LANGUAGE_MAP.keys()) | set(_TS_EXT_MAP.keys())
 
     for dirpath, dirnames, filenames in os.walk(project_root):
         dirnames[:] = [
